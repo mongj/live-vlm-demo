@@ -1,4 +1,5 @@
 .DS_Store
 *.log
+joyai/logs/
 __pycache__/
 .conda/

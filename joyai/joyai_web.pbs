@@ -3,13 +3,13 @@
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=3:host=cvml10
 #PBS -l walltime=12:00:00
 #PBS -j oe
-#PBS -o /home/mingjun/joyai_logs/pbs_joyai_web.log
+#PBS -o /home/mingjun/live-vlm-demo/joyai/logs/pbs_joyai_web.log
 #
 # Batch launch for JoyAI-VL webinfer + WebUI on the CVML cluster.
 # Interactive qsub (-I) is disabled here; this script is the replacement.
 #
 # Submit from caquelon:
-#   mkdir -p ~/joyai_logs
+#   mkdir -p ~/live-vlm-demo/joyai/logs
 #   qsub ~/live-vlm-demo/joyai/joyai_web.pbs
 #
 # After qstat shows R on cvml10, tunnel from the Mac:
@@ -24,7 +24,7 @@ set -euo pipefail
 JOYAI_ROOT="${JOYAI_ROOT:-/home/mingjun/JoyAI-VL-Interaction}"
 JOYAI_ENV="${JOYAI_ENV:-/home/mingjun/.conda/envs/joyai}"
 MODEL_ROOT="${MODEL_ROOT:-/mnt/rdata7/proactive/checkpoints}"
-LOG_DIR="${LOG_DIR:-/home/mingjun/joyai_logs}"
+LOG_DIR="${LOG_DIR:-/home/mingjun/live-vlm-demo/joyai/logs}"
 mkdir -p "$LOG_DIR"
 
 # PBS -o staging often never arrives on this cluster. Mirror everything to NFS.
@@ -41,7 +41,7 @@ for required in \
 do
   if [[ ! -e "$required" ]]; then
     echo "$(date --iso-8601=seconds) ${PBS_JOBID:-local} $(hostname): missing $required" \
-      >> "$HOME/joyai_pbs_failures.log"
+      >> "$LOG_DIR/joyai_pbs_failures.log"
     echo "missing $required on $(hostname); is /mnt/rdata7 mounted?" >&2
     exit 1
   fi
