@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N joyai_web
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=3:host=cvml10
-#PBS -l walltime=12:00:00
+#PBS -l walltime=01:00:00
 #PBS -j oe
 #PBS -o /home/mingjun/live-vlm-demo/joyai/logs/pbs_joyai_web.log
 #
