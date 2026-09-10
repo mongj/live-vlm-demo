@@ -1,0 +1,217 @@
+#!/bin/bash
+#PBS -N joyai_web
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=3:host=cvml10
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /home/mingjun/joyai_logs/pbs_joyai_web.log
+#
+# Batch launch for JoyAI-VL webinfer + WebUI on the CVML cluster.
+# Interactive qsub (-I) is disabled here; this script is the replacement.
+#
+# Submit from caquelon:
+#   mkdir -p ~/joyai_logs
+#   qsub ~/live-vlm-demo/joyai/joyai_web.pbs
+#
+# After qstat shows R on cvml10, tunnel from the Mac:
+#   ssh -L 8099:cvml10:8099 cvml-cluster
+# then open https://127.0.0.1:8099
+#
+# Stop from caquelon:
+#   qdel <jobid>
+
+set -euo pipefail
+
+JOYAI_ROOT="${JOYAI_ROOT:-/home/mingjun/JoyAI-VL-Interaction}"
+JOYAI_ENV="${JOYAI_ENV:-/home/mingjun/.conda/envs/joyai}"
+MODEL_ROOT="${MODEL_ROOT:-/mnt/rdata7/proactive/checkpoints}"
+LOG_DIR="${LOG_DIR:-/home/mingjun/joyai_logs}"
+mkdir -p "$LOG_DIR"
+
+# PBS -o staging often never arrives on this cluster. Mirror everything to NFS.
+exec > >(tee -a "$LOG_DIR/joyai_web.run.log") 2>&1
+
+echo "===== joyai_web start ====="
+echo "date=$(date --iso-8601=seconds) job=${PBS_JOBID:-local} host=$(hostname)"
+
+for required in \
+  "$JOYAI_ROOT/services/webinfer/scripts/run.sh" \
+  "$JOYAI_ENV/bin/python" \
+  "$MODEL_ROOT/JoyAI-VL-Interaction" \
+  "$MODEL_ROOT/Qwen3-VL-4B-Instruct"
+do
+  if [[ ! -e "$required" ]]; then
+    echo "$(date --iso-8601=seconds) ${PBS_JOBID:-local} $(hostname): missing $required" \
+      >> "$HOME/joyai_pbs_failures.log"
+    echo "missing $required on $(hostname); is /mnt/rdata7 mounted?" >&2
+    exit 1
+  fi
+done
+
+# shellcheck disable=SC1091
+source /apps/miniconda3/etc/profile.d/conda.sh
+conda activate "$JOYAI_ENV"
+export PATH="$JOYAI_ENV/bin:$PATH"
+export PYTHON_BIN="$JOYAI_ENV/bin/python"
+export VENV_ACTIVATE=
+
+command -v ninja >/dev/null || {
+  echo "ninja not on PATH; FlashInfer JIT needs it in $JOYAI_ENV" >&2
+  exit 1
+}
+
+resolve_gpu() {
+  local gpu="$1" index
+  if [[ "$gpu" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$gpu"
+    return
+  fi
+  index="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader \
+    | awk -F', *' -v uuid="$gpu" '$2 == uuid || index($2, uuid) == 1 {print $1; exit}')"
+  [[ "$index" =~ ^[0-9]+$ ]] || {
+    echo "could not resolve allocated GPU $gpu" >&2
+    exit 1
+  }
+  printf '%s\n' "$index"
+}
+
+IFS=',' read -r -a GPU_IDS <<< "${CUDA_VISIBLE_DEVICES:-0,1,2}"
+(( ${#GPU_IDS[@]} >= 3 )) || {
+  echo "JoyAI web stack needs 3 GPUs; got ${CUDA_VISIBLE_DEVICES:-unset}" >&2
+  exit 1
+}
+G0="$(resolve_gpu "${GPU_IDS[0]}")"
+G1="$(resolve_gpu "${GPU_IDS[1]}")"
+G2="$(resolve_gpu "${GPU_IDS[2]}")"
+export CUDA_VISIBLE_DEVICES="$G0,$G1,$G2"
+export MAIN_GPU="$G0,$G1"
+export SUMMARY_GPU="$G2"
+export TENSOR_PARALLEL_SIZE=2
+
+export MODEL_PATH="$MODEL_ROOT/JoyAI-VL-Interaction"
+export SUMMARY_MODEL_PATH="$MODEL_ROOT/Qwen3-VL-4B-Instruct"
+export SUMMARIZER_MODEL="$SUMMARY_MODEL_PATH"
+export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-JoyAI-VL-Interaction}"
+export MAIN_MODEL="$SERVED_MODEL_NAME"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
+export SUMMARY_MAX_MODEL_LEN="${SUMMARY_MAX_MODEL_LEN:-32768}"
+export MAIN_MODEL_PORT="${MAIN_MODEL_PORT:-7060}"
+export SUMMARY_PORT="${SUMMARY_PORT:-8065}"
+export ADAPTER_HOST="${ADAPTER_HOST:-127.0.0.1}"
+export ADAPTER_PORT="${ADAPTER_PORT:-8070}"
+export WEBUI_HOST="${WEBUI_HOST:-0.0.0.0}"
+export WEBUI_PORT="${WEBUI_PORT:-8099}"
+export SAVE_SERVICE_LOGS=1
+export LIVE_SAVE_OUTPUTS=false
+export LIVE_SAVE_DEBUG_INPUTS=false
+export SAVE_MODEL_INPUTS=false
+export FORCE_SILENCE_BEFORE_QUERY="${FORCE_SILENCE_BEFORE_QUERY:-true}"
+
+echo "python=$PYTHON_BIN ($("$PYTHON_BIN" -V 2>&1))"
+echo "gpus CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES main=$MAIN_GPU summary=$SUMMARY_GPU"
+echo "ports main=$MAIN_MODEL_PORT summary=$SUMMARY_PORT adapter=$ADAPTER_PORT webui=$WEBUI_PORT"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+
+kill_tree() {
+  local sig="$1" pid="$2" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$sig" "$child"
+  done
+  kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+pids_on_port() {
+  lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null || fuser -n tcp "$1" 2>/dev/null || true
+}
+
+WEBINFER_PID=""
+WEBUI_PID=""
+
+cleanup() {
+  set +e
+  echo "cleanup starting at $(date --iso-8601=seconds)"
+  local port pid
+  for port in "$MAIN_MODEL_PORT" "$SUMMARY_PORT" "$ADAPTER_PORT" "$WEBUI_PORT"; do
+    for pid in $(pids_on_port "$port"); do
+      kill_tree TERM "$pid"
+    done
+  done
+  if [[ -n "$WEBINFER_PID" ]] && kill -0 "$WEBINFER_PID" 2>/dev/null; then
+    kill_tree TERM "$WEBINFER_PID"
+  fi
+  if [[ -n "$WEBUI_PID" ]] && kill -0 "$WEBUI_PID" 2>/dev/null; then
+    kill_tree TERM "$WEBUI_PID"
+  fi
+  sleep 5
+  for port in "$MAIN_MODEL_PORT" "$SUMMARY_PORT" "$ADAPTER_PORT" "$WEBUI_PORT"; do
+    for pid in $(pids_on_port "$port"); do
+      kill_tree KILL "$pid"
+    done
+  done
+  echo "cleanup done at $(date --iso-8601=seconds)"
+}
+trap cleanup EXIT INT TERM
+
+cd "$JOYAI_ROOT/services/webinfer"
+bash scripts/run.sh all > "$LOG_DIR/webinfer.log" 2>&1 &
+WEBINFER_PID=$!
+
+health_ok() {
+  curl -fsS --max-time 5 "http://127.0.0.1:${MAIN_MODEL_PORT}/v1/models" >/dev/null &&
+    curl -fsS --max-time 5 "http://127.0.0.1:${SUMMARY_PORT}/v1/models" >/dev/null &&
+    curl -fsS --max-time 5 "http://127.0.0.1:${ADAPTER_PORT}/health" >/dev/null
+}
+
+echo "Waiting for webinfer (main/summary/adapter)..."
+ready=false
+for _ in $(seq 1 360); do
+  if ! kill -0 "$WEBINFER_PID" 2>/dev/null; then
+    echo "webinfer exited before becoming ready; last 80 lines:" >&2
+    tail -n 80 "$LOG_DIR/webinfer.log" >&2 || true
+    exit 1
+  fi
+  if health_ok; then
+    ready=true
+    break
+  fi
+  sleep 5
+done
+if [[ "$ready" != true ]]; then
+  echo "timed out waiting for webinfer" >&2
+  tail -n 80 "$LOG_DIR/webinfer.log" >&2 || true
+  exit 1
+fi
+echo "webinfer ready"
+
+cd "$JOYAI_ROOT/services/webui"
+bash scripts/start_server.sh > "$LOG_DIR/webui.log" 2>&1 &
+WEBUI_PID=$!
+
+webui_ok() {
+  curl -kfsS --max-time 5 "https://127.0.0.1:${WEBUI_PORT}/" >/dev/null
+}
+
+echo "Waiting for WebUI..."
+ready=false
+for _ in $(seq 1 60); do
+  if ! kill -0 "$WEBUI_PID" 2>/dev/null; then
+    echo "webui exited before becoming ready; last 80 lines:" >&2
+    tail -n 80 "$LOG_DIR/webui.log" >&2 || true
+    exit 1
+  fi
+  if webui_ok; then
+    ready=true
+    break
+  fi
+  sleep 2
+done
+if [[ "$ready" != true ]]; then
+  echo "timed out waiting for WebUI" >&2
+  tail -n 80 "$LOG_DIR/webui.log" >&2 || true
+  exit 1
+fi
+
+echo "WebUI ready on https://$(hostname):${WEBUI_PORT}"
+echo "From your Mac: ssh -L 8099:$(hostname):8099 cvml-cluster"
+echo "Then open https://127.0.0.1:8099"
+
+wait "$WEBUI_PID"
