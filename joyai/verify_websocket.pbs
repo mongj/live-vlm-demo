@@ -1,0 +1,9 @@
+#!/bin/bash
+#PBS -N joyai_ws_check
+#PBS -l select=1:ncpus=1:mem=1gb:host=cvml10
+#PBS -l walltime=00:03:00
+#PBS -j oe
+#PBS -o /dev/null
+set -euo pipefail
+exec > /home/mingjun/live-vlm-demo/joyai/logs/verify-websocket.log 2>&1
+/home/mingjun/.conda/envs/joyai-py312-cu129/bin/python /home/mingjun/live-vlm-demo/joyai/tests/smoke_websocket.py

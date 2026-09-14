@@ -9,7 +9,8 @@
 set -euo pipefail
 
 JOYAI_ROOT="${JOYAI_ROOT:-/home/mingjun/JoyAI-VL-Interaction}"
-JOYAI_ENV="${JOYAI_ENV:-/home/mingjun/.conda/envs/joyai}"
+JOYAI_WEBUI_ROOT="${JOYAI_WEBUI_ROOT:-/home/mingjun/live-vlm-demo/joyai/webui}"
+JOYAI_ENV="${JOYAI_ENV:-/home/mingjun/.conda/envs/joyai-py312-cu129}"
 MODEL_ROOT="${MODEL_ROOT:-/mnt/rdata7/proactive/checkpoints}"
 LOG_DIR="${LOG_DIR:-/home/mingjun/live-vlm-demo/joyai/logs}"
 mkdir -p "$LOG_DIR"
@@ -22,6 +23,7 @@ echo "date=$(date --iso-8601=seconds) job=${PBS_JOBID:-local} host=$(hostname)"
 
 for required in \
   "$JOYAI_ROOT/services/webinfer/scripts/run.sh" \
+  "$JOYAI_WEBUI_ROOT/scripts/start_server.sh" \
   "$JOYAI_ENV/bin/python" \
   "$MODEL_ROOT/JoyAI-VL-Interaction" \
   "$MODEL_ROOT/Qwen3-VL-4B-Instruct"
@@ -34,11 +36,11 @@ do
   fi
 done
 
-# shellcheck disable=SC1091
-source /apps/miniconda3/etc/profile.d/conda.sh
-conda activate "$JOYAI_ENV"
+# Use the installed environment directly; Conda itself need not exist on the node.
 export PATH="$JOYAI_ENV/bin:$PATH"
 export PYTHON_BIN="$JOYAI_ENV/bin/python"
+# The WebUI launcher checks this marker when automatic activation is disabled.
+export CONDA_DEFAULT_ENV="$JOYAI_ENV"
 export VENV_ACTIVATE=
 
 command -v ninja >/dev/null || {
@@ -91,6 +93,9 @@ export SAVE_SERVICE_LOGS=1
 export LIVE_SAVE_OUTPUTS=false
 export LIVE_SAVE_DEBUG_INPUTS=false
 export SAVE_MODEL_INPUTS=false
+# Keep camera frames in a writable directory unique to this PBS job.
+export FRAME_SAVE_DIR="$(mktemp -d /tmp/joyai-frames.XXXXXXXX)"
+export ALLOWED_LOCAL_IMAGE_ROOTS="$FRAME_SAVE_DIR"
 export FORCE_SILENCE_BEFORE_QUERY="${FORCE_SILENCE_BEFORE_QUERY:-true}"
 
 echo "python=$PYTHON_BIN ($("$PYTHON_BIN" -V 2>&1))"
@@ -169,7 +174,7 @@ if [[ "$ready" != true ]]; then
 fi
 echo "webinfer ready"
 
-cd "$JOYAI_ROOT/services/webui"
+cd "$JOYAI_WEBUI_ROOT"
 bash scripts/start_server.sh > "$LOG_DIR/webui.log" 2>&1 &
 WEBUI_PID=$!
 

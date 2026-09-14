@@ -1,0 +1,28 @@
+#!/bin/bash
+#PBS -N cuda_probe
+#PBS -l walltime=00:02:00
+#PBS -j oe
+#PBS -o /dev/null
+set -uo pipefail
+LOG_DIR=/home/mingjun/live-vlm-demo/joyai/logs
+mkdir -p "$LOG_DIR"
+exec > "$LOG_DIR/cuda_probe_${PBS_JOBID}.log" 2>&1
+hostname
+date --iso-8601=seconds
+cat /proc/driver/nvidia/version
+timeout 20 /usr/bin/python3 - <<'PY'
+import ctypes
+cuda = ctypes.CDLL("libcuda.so.1")
+version = ctypes.c_int()
+get_version = cuda.cuDriverGetVersion
+get_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
+get_version.restype = ctypes.c_int
+status = get_version(ctypes.byref(version))
+print(f"cuDriverGetVersion status={status} raw={version.value}")
+if status != 0 or version.value <= 0:
+    raise SystemExit(1)
+print(f"CUDA driver API support: {version.value // 1000}.{(version.value % 1000) // 10}")
+PY
+timeout 20 nvidia-smi --query-gpu=driver_version,name --format=csv,noheader
+timeout 20 nvidia-smi -q | head -n 14
+echo PROBE_DONE
