@@ -1,19 +1,7 @@
 #!/bin/bash
-#PBS -N joyai_backend
-#PBS -l ngpus=3
-#PBS -l walltime=01:00:00
-#PBS -j oe
-#PBS -o /home/mingjun/live-vlm-demo/joyai/logs/pbs_joyai_web.log
 #
 # Batch launch for JoyAI-VL webinfer + WebUI on the CVML cluster.
 # Interactive qsub (-I) is disabled here; this script is the replacement.
-#
-# Submit from caquelon:
-#   mkdir -p ~/live-vlm-demo/joyai/logs
-#   qsub -l select=1:ngpus=3:mem=64gb:host=cvml01 ~/live-vlm-demo/scripts/joyai.pbs
-#
-# Stop from caquelon:
-#   qdel <jobid>
 #
 # [NOTE] Supported pbs nodes:
 # cvml01, cvml03, cvml10, cvml11, cvml12
