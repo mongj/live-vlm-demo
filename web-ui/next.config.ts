@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const gatewayUrl = (process.env.NEXT_PUBLIC_VLM_GATEWAY_URL ?? "http://127.0.0.1:8787").replace(
+const gatewayUrl = (process.env.VLM_GATEWAY_URL ?? "http://127.0.0.1:8787").replace(
   /\/$/,
   ""
 );

@@ -146,7 +146,12 @@ Offline Catalog discovery and Mock Sessions are covered by `python -m pytest`.
 
 Live JoyAI Start/reset, one visual turn, presentable versus Raw output, and Session cleanup against a deployed webinfer endpoint are recorded here when that route is available.
 
-**Status (2026-09-14):** pending. `http://127.0.0.1:8070/health` was not reachable from this machine, so reset and inference were not smoke-tested against a live webinfer job. Offline Catalog, Mock Sessions, and JoyAI-adapter contract tests with a fake HTTP transport all pass.
+**Status (2026-09-15):** verified against PBS job `120424.caquelon` on `cvml01`.
+An internal SSH tunnel connects the gateway host's `127.0.0.1:8070` to the compute
+node's loopback adapter. Through frontend `ws://127.0.0.1:3001/v1/realtime`, a JoyAI
+Session started successfully and a synthetic red JPEG returned `text: "Red"`,
+`raw: "</response> Red"`, and `final: true`. The route depends on the running PBS
+job and internal tunnel; see the root README for tunnel setup.
 
 ## Session wire
 

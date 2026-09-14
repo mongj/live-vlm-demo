@@ -45,16 +45,35 @@ The frontend listens on port 3001; the gateway listens on port 8787.
 Port 3000 is already occupied on this machine.
 The Mock model works without a downstream model service.
 
-The current client opens its WebSocket directly to browser-local port 8787.
-Until the client uses a same-origin WebSocket proxy, remote use needs both ports
-forwarded. Run on your laptop, replacing `YOUR_HOST` with this machine's SSH host:
+Next.js proxies browser HTTP and WebSocket traffic to FastAPI on localhost.
+Only the frontend port needs forwarding. Run on your laptop, replacing
+`YOUR_HOST` with this machine's SSH host:
 
 ```bash
-ssh -N -L 3001:127.0.0.1:3001 -L 8787:127.0.0.1:8787 YOUR_HOST
+ssh -N -L 3001:127.0.0.1:3001 YOUR_HOST
 ```
 
-Then open `http://localhost:3001`. Forwarding only port 3001 currently supports
-the catalog rewrite, but does not route the client's WebSocket to this machine.
+Then open `http://localhost:3001`. To change the gateway destination, set
+`VLM_GATEWAY_URL` in `web-ui/.env.local` (default `http://127.0.0.1:8787`), then
+restart development or rebuild production.
+
+### JoyAI on a PBS compute node
+
+When the gateway runs on the login node and JoyAI runs on a compute node,
+connect their loopback ports with an internal tunnel. On the login node, replace
+`cvml01` with the running job's node (shown by `qstat -f JOB_ID`):
+
+```bash
+ssh -fNT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:8070:127.0.0.1:8070 cvml01
+curl -fsS http://127.0.0.1:8070/health
+```
+
+This requires SSH key access from the login node to the compute node. The gateway
+catalog can keep `base_url = "http://127.0.0.1:8070/v1"`. A replacement PBS job
+may run on another node; stop the old internal tunnel before starting one to the
+new node. The model stops when its PBS walltime expires. The Mac still forwards
+only the frontend port.
 
 ## Verify
 

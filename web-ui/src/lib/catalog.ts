@@ -45,19 +45,5 @@ async function readCatalog(url: string): Promise<CatalogModel[]> {
 }
 
 export async function fetchCatalog(): Promise<CatalogModel[]> {
-  try {
-    return await readCatalog(getCatalogUrl());
-  } catch (directError) {
-    if (typeof window === "undefined") {
-      throw directError instanceof Error ? directError : new Error("Unable to load the model Catalog");
-    }
-    try {
-      return await readCatalog(`${window.location.origin}/v1/models`);
-    } catch {
-      if (directError instanceof Error) {
-        throw directError;
-      }
-      throw new Error("Unable to load the model Catalog");
-    }
-  }
+  return readCatalog(getCatalogUrl());
 }

@@ -8,7 +8,7 @@ Model communication goes only to the gateway. This app does not call the Vercel 
 
 - Node.js 20.9+
 - Yarn 4
-- Gateway listening on `NEXT_PUBLIC_VLM_GATEWAY_URL` (default `http://127.0.0.1:8787`)
+- Gateway listening on `VLM_GATEWAY_URL` (default `http://127.0.0.1:8787`)
 
 ## Setup
 
@@ -30,16 +30,25 @@ yarn start
 
 ## Gateway URL
 
-`NEXT_PUBLIC_VLM_GATEWAY_URL` is the gateway HTTP origin.
+`VLM_GATEWAY_URL` is the server-side FastAPI destination (default
+`http://127.0.0.1:8787`). It is used only by Next.js rewrites.
 
-| Value | Result |
-| --- | --- |
-| `http://127.0.0.1:8787` (default) | Catalog HTTP and `ws://127.0.0.1:8787/v1/realtime` |
-| `https://host.example/path` | Catalog HTTP and `wss://host.example/path/v1/realtime` |
+The browser requests `/v1/models` and opens `/v1/realtime` on the frontend's
+origin. Next.js proxies both HTTP and WebSocket traffic to FastAPI. An HTTPS
+frontend uses `wss`; an HTTP frontend uses `ws`. FastAPI can stay on loopback HTTP.
 
-The realtime socket always connects to that origin. Catalog discovery first requests `GET {gateway}/v1/models`. If the browser blocks that cross-origin request, the UI falls back to same-origin `/v1/models`, which Next.js rewrites to the gateway.
+Restart `yarn dev` or rebuild production after changing `VLM_GATEWAY_URL`.
+This replaces the old `NEXT_PUBLIC_VLM_GATEWAY_URL` setting; rename it in any
+existing `.env.local` file.
 
-Restart `yarn dev` or rebuild after changing the env var.
+For an SSH tunnel, only forward the frontend port. For example, run the UI with
+`yarn dev --hostname 127.0.0.1 --port 3001`, then on your laptop:
+
+```bash
+ssh -N -L 3001:127.0.0.1:3001 YOUR_HOST
+```
+
+Open `http://localhost:3001`. The gateway's port 8787 does not need forwarding.
 
 ## Camera and HTTPS
 
@@ -47,7 +56,7 @@ Restart `yarn dev` or rebuild after changing the env var.
 
 - `http://localhost` and `http://127.0.0.1` are secure during development.
 - A remotely accessed lab deployment must use HTTPS, or an SSH/localhost tunnel so the browser still sees localhost.
-- If the page is HTTPS, the gateway URL must also be HTTPS so the WebSocket can use `wss`. Mixed content will fail.
+- If the page is HTTPS, the browser uses `wss` to the frontend; the server-side gateway connection may still use HTTP.
 
 ## Session behavior
 
