@@ -11,7 +11,7 @@ JOYAI_NODES := cvml01 cvml03 cvml10 cvml11 cvml12
 define JOYAI_PICK_JQ
 def kb:
   ascii_downcase
-  | capture("^(?<n>[0-9]+)(?<u>[a-z]*)$") as $$c
+  | capture("^(?<n>[0-9]+)(?<u>[a-z]*)$$") as $$c
   | ($$c.n | tonumber) * (
       if $$c.u == "gb" then 1048576
       elif $$c.u == "mb" then 1024
@@ -42,20 +42,24 @@ def info($$n):
 endef
 export JOYAI_PICK_JQ
 
+define JOYAI_STATUS_JQ
+($$order | split(" "))[] as $$n
+| select(.nodes[$$n] != null)
+| .nodes[$$n] as $$node
+| $$node.resources_available as $$a
+| ($$node.resources_assigned // {}) as $$s
+| "\($$n)\tstate=\($$node.state)\tngpus=\($$a.ngpus - ($$s.ngpus // 0))/\($$a.ngpus)\tmem=\($$a.mem) assigned=\($$s.mem // "0")"
+endef
+export JOYAI_STATUS_JQ
+
 .PHONY: joyai
 joyai:
 	@command -v pbsnodes >/dev/null && command -v qsub >/dev/null && command -v jq >/dev/null || { \
 		echo "need pbsnodes, qsub, and jq on PATH; run this on caquelon" >&2; \
 		exit 1; \
 	}
-	@json=$$(pbsnodes -a -F json); \
-	printf '%s\n' "$$json" | jq -r --arg order "$(JOYAI_NODES)" '\
-		($$order | split(" "))[] as $$n \
-		| select(.nodes[$$n] != null) \
-		| .nodes[$$n] as $$node \
-		| $$node.resources_available as $$a \
-		| ($$node.resources_assigned // {}) as $$s \
-		| "\($$n)\tstate=\($$node.state)\tngpus=\($$a.ngpus - ($$s.ngpus // 0))/\($$a.ngpus)\tmem=\($$a.mem) assigned=\($$s.mem // "0")"' ; \
+	@json=$$(pbsnodes -a -F json) || exit 1; \
+	printf '%s\n' "$$json" | jq -r --arg order "$(JOYAI_NODES)" "$$JOYAI_STATUS_JQ" || exit 1; \
 	echo; \
 	pick=$$(printf '%s\n' "$$json" | jq -er --arg order "$(JOYAI_NODES)" --argjson need_gpu $(JOYAI_NGPUS) --arg need_mem "$(JOYAI_MEM)" "$$JOYAI_PICK_JQ") || { \
 		echo "no supported node has $(JOYAI_NGPUS) free GPUs and $(JOYAI_MEM) free RAM" >&2; \
