@@ -1,7 +1,6 @@
 #!/bin/bash
-#PBS -N joyai_web
-#PBS -l select=1:ncpus=8:mem=64gb:ngpus=3:host=cvml10
-#PBS -l walltime=01:00:00
+#PBS -N joyai_backend
+#PBS -l select=1:ngpus=3:walltime=1:00:00
 #PBS -j oe
 #PBS -o /home/mingjun/live-vlm-demo/joyai/logs/pbs_joyai_web.log
 #
@@ -10,14 +9,18 @@
 #
 # Submit from caquelon:
 #   mkdir -p ~/live-vlm-demo/joyai/logs
-#   qsub ~/live-vlm-demo/joyai/joyai_web.pbs
+#   qsub -l mem=64gb -l host=cvml01 \
+#        ~/live-vlm-demo/joyai/joyai.pbs
 #
-# After qstat shows R on cvml10, tunnel from the Mac:
-#   ssh -L 8099:cvml10:8099 cvml-cluster
+# After qstat shows R, tunnel from the Mac (replace HOST with the job node):
+#   ssh -L 8099:${HOST}:8099 cvml-cluster
 # then open https://127.0.0.1:8099
 #
 # Stop from caquelon:
 #   qdel <jobid>
+#
+# [NOTE] Supported pbs nodes:
+# cvml01, cvml03, cvml10, cvml11, cvml12
 
 set -euo pipefail
 
