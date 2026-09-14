@@ -1,8 +1,29 @@
 PATH := /opt/pbs/bin:$(PATH)
 export PATH
 
+.DEFAULT_GOAL := help
+
+.PHONY: help
+help:
+	@printf '%s\n' \
+		'Usage: make <command>' \
+		'' \
+		'  help               Show this help (default)' \
+		'  install            Create/reuse Conda environment and install dependencies' \
+		'  server             Start gateway in screen live-vlm-server (port 8787)' \
+		'  client             Start frontend in screen live-vlm-client (port 3001)' \
+		'  joyai              Start PBS job and tunnel together in screen live-vlm-joyai'
+
+CONDA ?= conda
+INSTALL_ENV := live-vlm-demo
+CLIENT_HOST ?= 127.0.0.1
+CLIENT_PORT ?= 3001
+
 JOYAI_SCRIPT := $(CURDIR)/scripts/joyai.pbs
 JOYAI_LOG := $(HOME)/live-vlm-demo/joyai/logs/pbs_joyai_web.log
+JOYAI_SESSION := $(CURDIR)/scripts/joyai-session.py
+JOYAI_WAIT_SECONDS ?= 1800
+export JOYAI_WAIT_SECONDS
 JOYAI_WALLTIME ?= 01:00:00
 JOYAI_MEM := 64gb
 JOYAI_NGPUS := 3
@@ -54,11 +75,15 @@ export JOYAI_STATUS_JQ
 
 .PHONY: joyai
 joyai:
-	@command -v pbsnodes >/dev/null && command -v qsub >/dev/null && command -v jq >/dev/null || { \
-		echo "need pbsnodes, qsub, and jq on PATH; run this on caquelon" >&2; \
+	@command -v pbsnodes >/dev/null && command -v qsub >/dev/null && command -v jq >/dev/null && command -v screen >/dev/null && command -v ssh >/dev/null && command -v curl >/dev/null && command -v flock >/dev/null && command -v qstat >/dev/null && command -v qdel >/dev/null && command -v python3 >/dev/null || { \
+		echo "need pbsnodes, qsub, qstat, qdel, python3, jq, screen, ssh, curl, and flock on PATH; run this on caquelon" >&2; \
 		exit 1; \
 	}
-	@json=$$(pbsnodes -a -F json) || exit 1; \
+	@if screen -ls | grep -Eq '[0-9]+\.live-vlm-joyai[[:space:]]'; then \
+		bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-joyai "$(CURDIR)" "$(CURDIR)/joyai/logs/session.screen.log" python3; \
+		exit 0; \
+	fi; \
+	json=$$(pbsnodes -a -F json) || exit 1; \
 	printf '%s\n' "$$json" | jq -r --arg order "$(JOYAI_NODES)" "$$JOYAI_STATUS_JQ" || exit 1; \
 	echo; \
 	pick=$$(printf '%s\n' "$$json" | jq -er --arg order "$(JOYAI_NODES)" --argjson need_gpu $(JOYAI_NGPUS) --arg need_mem "$(JOYAI_MEM)" "$$JOYAI_PICK_JQ") || { \
@@ -76,7 +101,29 @@ joyai:
 		*) echo "aborted"; exit 1 ;; \
 	esac; \
 	mkdir -p "$$(dirname "$(JOYAI_LOG)")"; \
-	qsub -N joyai_backend -j oe -o "$(JOYAI_LOG)" \
-		-l select=1:ngpus=$(JOYAI_NGPUS):mem=$(JOYAI_MEM):host=$$host \
-		-l walltime=$(JOYAI_WALLTIME) \
-		"$(JOYAI_SCRIPT)"
+	bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-joyai "$(CURDIR)" "$(CURDIR)/joyai/logs/session.screen.log" \
+		python3 -u "$(JOYAI_SESSION)" --node "$$host" --script "$(JOYAI_SCRIPT)" \
+		--log "$(JOYAI_LOG)" --mem "$(JOYAI_MEM)" --walltime "$(JOYAI_WALLTIME)"
+
+
+.PHONY: install
+install:
+	@command -v "$(CONDA)" >/dev/null || { echo "Conda is required; install it or set CONDA=/path/to/conda." >&2; exit 1; }
+	@envs=$$("$(CONDA)" env list) || exit 1; \
+	if printf '%s\n' "$$envs" | awk '$$1 == "$(INSTALL_ENV)" { found=1 } END { exit !found }'; then \
+		echo "Reusing Conda environment $(INSTALL_ENV)"; \
+	else \
+		"$(CONDA)" env create -f "$(CURDIR)/environment.yml" -y || exit 1; \
+	fi
+	"$(CONDA)" run -n $(INSTALL_ENV) npm install --global corepack
+	"$(CONDA)" run -n $(INSTALL_ENV) corepack enable
+	"$(CONDA)" run -n $(INSTALL_ENV) corepack install --global yarn@4.9.2
+	"$(CONDA)" run -n $(INSTALL_ENV) python -m pip install -e '$(CURDIR)/web-server[dev]'
+	cd "$(CURDIR)/web-ui" && "$(CONDA)" run -n $(INSTALL_ENV) yarn install --immutable
+
+.PHONY: server client
+server:
+	@bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-server "$(CURDIR)/web-server" "$(CURDIR)/logs/server.screen.log" "$(CONDA)" run --no-capture-output -n $(INSTALL_ENV) python -m live_vlm_server
+
+client:
+	@bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-client "$(CURDIR)/web-ui" "$(CURDIR)/logs/client.screen.log" "$(CONDA)" run --no-capture-output -n $(INSTALL_ENV) yarn dev --hostname "$(CLIENT_HOST)" --port "$(CLIENT_PORT)"
