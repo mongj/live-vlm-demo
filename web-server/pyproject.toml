@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "live-vlm-server"
+version = "0.1.0"
+description = "Live VLM playground gateway with an HTTP Catalog and JSON WebSocket Session API."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "pydantic>=2.0",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+live-vlm-server = "live_vlm_server.__main__:main"
+
+[tool.setuptools]
+package-dir = { "live_vlm_server" = "src" }
+packages = ["live_vlm_server", "live_vlm_server.adapters"]
+
+[tool.setuptools.package-data]
+live_vlm_server = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+explicit_package_bases = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = "live_vlm_server"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "live_vlm_server.*"
+ignore_missing_imports = true

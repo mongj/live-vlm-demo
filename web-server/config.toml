@@ -1,0 +1,10 @@
+[[models]]
+id = "joyai-vl"
+adapter = "joyai"
+label = "JoyAI-VL-Interaction"
+base_url = "http://127.0.0.1:8070/v1"
+
+[[models]]
+id = "mock"
+adapter = "mock"
+label = "Mock"
