@@ -494,7 +494,7 @@ Audio-only and Frame-only turns both work. The feeder immediately attempts anoth
 
 The gateway binds to `127.0.0.1:8787` by default. Catalog discovery and Mock Sessions work without a cluster connection. The README includes environment setup, install/run/test commands, and copyable Mock and JoyAI client examples.
 
-The [PBS launcher](../scripts/joyai/joyai_web.pbs) uses these separate ports:
+The [PBS launcher](../scripts/joyai.pbs) uses these separate ports:
 
 | Service | Default port | Role |
 | --- | --- | --- |

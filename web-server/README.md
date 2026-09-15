@@ -102,7 +102,7 @@ base_url = "http://127.0.0.1:8070/v1"
 
 Edit `base_url` when the tunnel or local port differs. It must be HTTP(S) and end in `/v1`.
 
-The PBS launcher (`scripts/joyai/joyai_web.pbs`) uses these ports:
+The PBS launcher ([scripts/joyai.pbs](../scripts/joyai.pbs)) uses these ports:
 
 | Service | Default port | Role |
 | --- | --- | --- |

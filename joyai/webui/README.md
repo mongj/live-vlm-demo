@@ -1,4 +1,5 @@
-This workspace copy of the JoyAI WebUI is launched by `../joyai_web.pbs`.
+This workspace copy of the JoyAI WebUI is launched by `../../scripts/joyai.pbs`
+through `make joyai` from the repository root.
 The original source was copied from
 `/home/mingjun/JoyAI-VL-Interaction/services/webui`.
 
@@ -22,6 +23,3 @@ Run the transport tests from the parent `joyai` directory:
 PYTHONPATH=webui/src /home/mingjun/.conda/envs/joyai-py312-cu129/bin/python -m unittest discover -s tests -v
 node tests/test_camera_upload.cjs
 ```
-
-`../verify_websocket.pbs` tests a synthetic red image against the running
-WebUI and real model on cvml10, then removes its test session.
