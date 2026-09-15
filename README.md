@@ -64,43 +64,40 @@ restart development or rebuild production.
 
 ### JoyAI on a PBS compute node
 
-Run `make joyai` on the login/gateway host (`caquelon`). After the submission
-confirmation, it starts a detached screen named `live-vlm-joyai`. Its supervisor
-submits the PBS job, waits for its assigned node, starts the internal SSH tunnel,
-and checks the adapter plus both model servers. Watch startup with:
+Run `make joyai` on the login/gateway host (`caquelon`). It selects an available
+supported node, asks for confirmation, submits the PBS job, and returns with the
+job ID and commands to start and stop the tunnel. The job may still be queued;
+submission does not mean the model servers are ready.
+
+Run the printed tunnel command on the same login/gateway host. For example,
+if the selected node is `cvml01`:
 
 ```bash
-screen -r live-vlm-joyai
+screen -dmS live-vlm-joyai-tunnel ssh -NT -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none -L 127.0.0.1:8070:127.0.0.1:8070 cvml01
 ```
 
-Detach with **Ctrl+A, then D** to keep the job and tunnel running. Stop both by
-deleting the screen (or pressing Ctrl+C while attached):
+Stop the tunnel with:
 
 ```bash
-screen -S live-vlm-joyai -X quit
+screen -S live-vlm-joyai-tunnel -X quit
 ```
 
-There are no separate tunnel commands. If SSH exits, the supervisor cancels the
-PBS job. If the PBS job ends, moves, or cannot be queried, it stops the tunnel
-and requests job cancellation. Monitoring polls PBS every 5 seconds. Startup
-failure or timeout also cancels the job. Configure the startup timeout with
-`make joyai JOYAI_WAIT_SECONDS=2400` (default 1800 seconds).
+The tunnel and PBS job are independent. Closing the tunnel leaves the job running;
+stop the job with `qdel JOB_ID`, using the ID printed by `make joyai`. PBS also
+stops it at its walltime limit (default one hour, configurable with
+`make joyai JOYAI_WALLTIME=02:00:00`). Each confirmed `make joyai` invocation
+submits a new job. Stop an existing tunnel before starting a replacement.
 
-Repeated `make joyai` calls reuse the existing screen. Stop it first to launch a
-replacement. Logs are retained in `joyai/logs/session.screen.log` and
-`joyai/logs/session.log`; the latter also records cleanup after screen deletion.
-The screen also shows the last 50 lines and live output from
-`joyai/logs/webinfer.log` (combined adapter and model-server logs). The follower
-waits if the file is missing and follows it if recreated. It stops with the
-supervisor; the SSH tunnel continues running in the background while you view logs.
-If PBS cancellation fails after retries, `session.log` records the job ID and
-manual `qdel` command. Forced SIGKILL or a login-host crash cannot run cleanup;
-PBS walltime remains the final limit in those cases.
+Check the job with `qstat JOB_ID` and watch startup logs with:
 
-The helper requires `screen`, `ssh`, `curl`, `jq`, `flock`, `python3`, and PBS
-commands, plus SSH key access to the assigned compute node. The gateway catalog
-keeps `base_url = "http://127.0.0.1:8070/v1"`. The Mac still forwards only the
-frontend port.
+```bash
+tail -n 50 -F joyai/logs/webinfer.log
+```
+
+`make joyai` requires `pbsnodes`, `qsub`, and `jq`. Starting the tunnel requires
+`screen`, `ssh`, and SSH key access to the selected compute node. The gateway
+catalog keeps `base_url = "http://127.0.0.1:8070/v1"`. The Mac still forwards only
+the frontend port.
 
 ## Verify
 
