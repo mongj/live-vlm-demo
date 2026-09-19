@@ -6,19 +6,32 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { CameraViewState } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
 import { MicIcon, MicOffIcon, VideoIcon, VideoOffIcon } from "lucide-react";
-import type { RefObject } from "react";
+import { useEffect, useRef, type Ref, type RefObject } from "react";
 
 type CameraWorkspaceProps = {
-  videoRef: RefObject<HTMLVideoElement | null>;
+  videoRef: Ref<HTMLVideoElement | null>;
+  previewStream: MediaStream | null;
   cameraView: CameraViewState;
   cameraError: string | null;
   cameraOn: boolean;
   micOn: boolean;
   micError: string | null;
   sessionLive: boolean;
+  stageClassName?: string;
   onToggleCamera: () => void;
   onToggleMicrophone: () => void;
 };
+
+function assignRef<T>(ref: Ref<T> | undefined, value: T) {
+  if (!ref) {
+    return;
+  }
+  if (typeof ref === "function") {
+    ref(value);
+    return;
+  }
+  (ref as RefObject<T>).current = value;
+}
 
 function overlayCopy(
   view: CameraViewState,
@@ -100,12 +113,14 @@ function cameraStatusDotClass(sessionLive: boolean): string {
 
 export function CameraWorkspace({
   videoRef,
+  previewStream,
   cameraView,
   cameraError,
   cameraOn,
   micOn,
   micError,
   sessionLive,
+  stageClassName,
   onToggleCamera,
   onToggleMicrophone,
 }: CameraWorkspaceProps) {
@@ -115,17 +130,38 @@ export function CameraWorkspace({
   const cameraPending = cameraEngaged && !cameraOn;
   const cameraLabel = cameraEngaged ? "Turn camera off" : "Turn camera on";
   const micLabel = micOn ? "Turn microphone off" : "Turn microphone on";
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const video = localVideoRef.current;
+    if (!video) {
+      return;
+    }
+    if (previewStream) {
+      if (video.srcObject !== previewStream) {
+        video.srcObject = previewStream;
+        void video.play().catch(() => undefined);
+      }
+      return;
+    }
+    if (video.srcObject) {
+      video.srcObject = null;
+    }
+  }, [previewStream]);
 
   return (
     <main className="flex h-full min-h-0 min-w-0 flex-col bg-camera-stage">
-      <div className="@container flex min-h-0 flex-1 p-6">
+      <div className={cn("@container flex min-h-0 flex-1", stageClassName ?? "p-6")}>
         <div className="relative m-auto aspect-video w-[min(100%,calc(100cqh*16/9))] overflow-hidden rounded-lg bg-camera-preview">
           <video
             autoPlay
             className={cn("absolute inset-0 size-full object-contain", !showVideo && "opacity-0")}
             muted
             playsInline
-            ref={videoRef}
+            ref={(node) => {
+              localVideoRef.current = node;
+              assignRef(videoRef, node);
+            }}
           />
           {cameraView === "live" ? (
             <div className="absolute top-3 left-3 z-10 flex items-center gap-2 rounded-full bg-background/80 px-2.5 py-1 text-xs">

@@ -86,6 +86,17 @@
     --sidebar-ring: oklch(0.708 0 0);
     --camera-stage: oklch(0.97 0 0);
     --camera-preview: #FFFFFF;
+    --playground-mobile-transcript-line: 1.5rem;
+    --playground-mobile-transcript-lines: 5;
+    --playground-mobile-chat-height: calc(
+        var(--playground-mobile-transcript-lines) * var(--playground-mobile-transcript-line)
+    );
+    --playground-mobile-dock-header: 2.75rem;
+    --playground-mobile-dock-composer: 4rem;
+    --playground-mobile-dock-height: calc(
+        var(--playground-mobile-dock-header) + var(--playground-mobile-chat-height) +
+            var(--playground-mobile-dock-composer)
+    );
 }
 
 .dark {

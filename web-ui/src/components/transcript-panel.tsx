@@ -19,9 +19,14 @@ import {
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
+import { InputGroupAddon } from "@/components/ui/input-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { TranscriptMessage } from "@/hooks/use-playground";
+import { cn } from "@/lib/utils";
 import { BugIcon, MessageSquareIcon } from "lucide-react";
+import type { ReactNode } from "react";
+
+export type TranscriptDensity = "comfortable" | "compact";
 
 type TranscriptPanelProps = {
   messages: TranscriptMessage[];
@@ -29,9 +34,146 @@ type TranscriptPanelProps = {
   sessionActive: boolean;
   recoverableError: string | null;
   debugOpen: boolean;
+  density?: TranscriptDensity;
   onToggleDebug: () => void;
   onSend: (text: string) => Promise<void>;
 };
+
+function headerClass(density: TranscriptDensity): string {
+  switch (density) {
+    case "comfortable":
+      return "px-4 py-3";
+    case "compact":
+      return "px-3 py-2";
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function conversationContentClass(density: TranscriptDensity): string {
+  switch (density) {
+    case "comfortable":
+      return "gap-4 p-4";
+    case "compact":
+      return "gap-2 p-2";
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function emptyStateClass(density: TranscriptDensity): string | undefined {
+  switch (density) {
+    case "comfortable":
+      return undefined;
+    case "compact":
+      return "gap-1 p-2";
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function emptyStateIcon(density: TranscriptDensity): ReactNode {
+  switch (density) {
+    case "comfortable":
+      return <MessageSquareIcon className="size-5" />;
+    case "compact":
+      return undefined;
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function composerWrapClass(density: TranscriptDensity): string {
+  switch (density) {
+    case "comfortable":
+      return "border-t border-border p-3";
+    case "compact":
+      return "border-t border-border p-2";
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function textareaClass(density: TranscriptDensity): string {
+  switch (density) {
+    case "comfortable":
+      return "min-h-12";
+    case "compact":
+      return "field-sizing-fixed h-full min-h-0 max-h-none overflow-hidden py-2.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function textareaRows(density: TranscriptDensity): number | undefined {
+  switch (density) {
+    case "comfortable":
+      return undefined;
+    case "compact":
+      return 1;
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function promptInputClass(density: TranscriptDensity): string | undefined {
+  switch (density) {
+    case "comfortable":
+      return undefined;
+    case "compact":
+      return "[&_[data-slot=input-group]]:h-12 [&_[data-slot=input-group]]:flex-row [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:has-[>textarea]:h-12";
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
+
+function ComposerSubmit({
+  density,
+  sessionActive,
+  isStreaming,
+}: {
+  density: TranscriptDensity;
+  sessionActive: boolean;
+  isStreaming: boolean;
+}) {
+  const submit = (
+    <PromptInputSubmit
+      disabled={!sessionActive}
+      status={isStreaming ? "submitted" : "ready"}
+    />
+  );
+
+  switch (density) {
+    case "compact":
+      return (
+        <InputGroupAddon align="inline-end" className="pr-1.5 has-[>button]:mr-0">
+          {submit}
+        </InputGroupAddon>
+      );
+    case "comfortable":
+      return <PromptInputFooter className="justify-end">{submit}</PromptInputFooter>;
+    default: {
+      const exhaustive: never = density;
+      return exhaustive;
+    }
+  }
+}
 
 export function TranscriptPanel({
   messages,
@@ -39,6 +181,7 @@ export function TranscriptPanel({
   sessionActive,
   recoverableError,
   debugOpen,
+  density = "comfortable",
   onToggleDebug,
   onSend,
 }: TranscriptPanelProps) {
@@ -52,9 +195,26 @@ export function TranscriptPanel({
     void onSend(text);
   }
 
+  const composer = (
+    <>
+      {recoverableError && sessionActive ? (
+        <p className="mb-2 truncate text-xs text-destructive">{recoverableError}</p>
+      ) : null}
+      <PromptInput className={promptInputClass(density)} maxFiles={0} onSubmit={handleSubmit}>
+        <PromptInputTextarea
+          className={textareaClass(density)}
+          disabled={!sessionActive}
+          placeholder={sessionActive ? "Ask about what the camera sees" : "Start a Session to send a message"}
+          rows={textareaRows(density)}
+        />
+        <ComposerSubmit density={density} isStreaming={isStreaming} sessionActive={sessionActive} />
+      </PromptInput>
+    </>
+  );
+
   return (
     <aside className="flex h-full min-h-0 min-w-0 flex-col bg-background">
-      <div className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className={cn("flex items-center justify-between gap-3", headerClass(density))}>
         <p className="text-sm font-medium">Transcript</p>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -73,15 +233,16 @@ export function TranscriptPanel({
         </Tooltip>
       </div>
       <Conversation className="min-h-0">
-        <ConversationContent className="gap-4 p-4">
+        <ConversationContent className={conversationContentClass(density)}>
           {messages.length === 0 ? (
             <ConversationEmptyState
+              className={emptyStateClass(density)}
               description={
                 sessionActive
                   ? "Send a message"
                   : "Start a session to see the live transcript."
               }
-              icon={<MessageSquareIcon className="size-5" />}
+              icon={emptyStateIcon(density)}
               title="No messages"
             />
           ) : (
@@ -98,24 +259,7 @@ export function TranscriptPanel({
         </ConversationContent>
         <ConversationScrollButton />
       </Conversation>
-      <div className="border-t border-border p-3">
-        {recoverableError && sessionActive ? (
-          <p className="mb-2 text-xs text-destructive">{recoverableError}</p>
-        ) : null}
-        <PromptInput maxFiles={0} onSubmit={handleSubmit}>
-          <PromptInputTextarea
-            className="min-h-12"
-            disabled={!sessionActive}
-            placeholder={sessionActive ? "Ask about what the camera sees" : "Start a Session to send a message"}
-          />
-          <PromptInputFooter className="justify-end">
-            <PromptInputSubmit
-              disabled={!sessionActive}
-              status={isStreaming ? "submitted" : "ready"}
-            />
-          </PromptInputFooter>
-        </PromptInput>
-      </div>
+      <div className={composerWrapClass(density)}>{composer}</div>
     </aside>
   );
 }
