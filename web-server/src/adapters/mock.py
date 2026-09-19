@@ -17,6 +17,9 @@ MOCK_AUDIO_RETENTION_SECONDS = 1.0
 OUTBOUND_SAMPLE_RATE_HZ = 24_000
 SILENT_CHUNK_SECONDS = 0.1
 SILENT_PCM_CHUNK = bytes(int(OUTBOUND_SAMPLE_RATE_HZ * SILENT_CHUNK_SECONDS) * 2)
+SILENCE_RAW = "</silence>"
+RESPONSE_RAW_PREFIX = "</response> "
+MOCK_RESPONSE_TEXT = "This is a mock response"
 
 
 class MockConfig(BaseModel):
@@ -24,10 +27,11 @@ class MockConfig(BaseModel):
     latency_ms: int = Field(default=150, ge=0, le=5000)
 
 
-def mock_turn_chunks(frame_count: int, audio_bytes: int, query: str) -> tuple[str, str]:
-    sentence = f"Mock turn: frames={frame_count} audio_bytes={audio_bytes} text={query!r}"
-    mid = max(1, len(sentence) // 2)
-    return sentence[:mid], sentence[mid:]
+def mock_turn_payload(query: str) -> tuple[str, str]:
+    # Same presentable/raw split the client uses for JoyAI: tagged raw, display text.
+    if not query:
+        return "", SILENCE_RAW
+    return MOCK_RESPONSE_TEXT, f"{RESPONSE_RAW_PREFIX}{MOCK_RESPONSE_TEXT}"
 
 
 class MockAdapter(Adapter[MockConfig]):
@@ -39,6 +43,7 @@ class MockAdapter(Adapter[MockConfig]):
         self.audio_seconds_per_request = MOCK_AUDIO_SLICE_SECONDS
         self.audio_retention_seconds = MOCK_AUDIO_RETENTION_SECONDS
         self.session_id = ""
+        self._standing = ""
         self._query = ""
         self._replies: asyncio.Queue[Reply] = asyncio.Queue(maxsize=REPLY_QUEUE_SIZE)
 
@@ -48,8 +53,15 @@ class MockAdapter(Adapter[MockConfig]):
 
     def offer_text(self, text: str) -> None:
         stripped = text.strip()
-        if stripped:
-            self._query = stripped
+        if not stripped:
+            return
+        # Match JoyAI: chat lines accumulate as a standing query, then the
+        # next send_feed consumes that blob once (later frames stay silent).
+        if self._standing:
+            self._standing = f"{self._standing}\n{stripped}"
+        else:
+            self._standing = stripped
+        self._query = self._standing
 
     async def send_feed(self, frames: FrameBuffer, audio: AudioBuffer) -> bool:
         batch = frames.consume()
@@ -57,15 +69,12 @@ class MockAdapter(Adapter[MockConfig]):
         if not batch and pcm_slice is None:
             return False
         query = self._query
-        frame_count = len(batch)
-        audio_bytes = len(pcm_slice) if pcm_slice is not None else 0
+        self._query = ""
+        turn_t = batch[-1].t if batch else None
         await asyncio.sleep(self.config.latency_ms / 1000)
-        first, second = mock_turn_chunks(frame_count, audio_bytes, query)
+        text, raw = mock_turn_payload(query)
         await self._replies.put(
-            Reply(text=first, audio=SILENT_PCM_CHUNK, raw=first, final=False)
-        )
-        await self._replies.put(
-            Reply(text=second, audio=SILENT_PCM_CHUNK, raw=second, final=True)
+            Reply(text=text, audio=SILENT_PCM_CHUNK, raw=raw, final=True, t=turn_t)
         )
         return True
 
@@ -74,4 +83,5 @@ class MockAdapter(Adapter[MockConfig]):
             yield await self._replies.get()
 
     async def close(self) -> None:
+        self._standing = ""
         self._query = ""

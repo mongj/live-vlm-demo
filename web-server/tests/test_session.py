@@ -13,7 +13,7 @@ from pydantic import BaseModel
 import live_vlm_server.channel as channel_mod
 import live_vlm_server.session as session_mod
 from live_vlm_server.adapters.base import Adapter
-from live_vlm_server.adapters.mock import MockAdapter, MockConfig, mock_turn_chunks
+from live_vlm_server.adapters.mock import MockAdapter, MockConfig, mock_turn_payload
 from live_vlm_server.buffers import AudioBuffer, FrameBuffer
 from live_vlm_server.catalog import Catalog
 from live_vlm_server.channel import ClientChannel
@@ -139,7 +139,14 @@ class ScriptedAdapter(Adapter[MockConfig]):  # type: ignore[misc]
         if self.feed_error is not None:
             raise self.feed_error
         if self.emit_before_block:
-            await self._replies.put(Reply(text="early", raw="early", final=True))
+            await self._replies.put(
+                Reply(
+                    text="early",
+                    raw="early",
+                    final=True,
+                    t=batch[-1].t if batch else None,
+                )
+            )
         if self.feed_block is not None:
             await self.feed_block.wait()
         return True
@@ -232,15 +239,17 @@ async def test_accepted_field_error_keeps_earlier_frame() -> None:
     websocket.push_json({"type": "session.start", "model": "mock", "config": {"latency_ms": 0}})
     started = (await wait_json(websocket, 1))[0]
     websocket.push_json({"type": "input.append", "frame": JPEG_B64, "audio": "!!!!", "t": 1.25})
-    messages = await wait_json(websocket, 4)
+    messages = await wait_json(websocket, 3)
     error = next(message for message in messages if message["type"] == "error")
     chunks = [message for message in messages if message["type"] == "response.chunk"]
+    expected_text, expected_raw = mock_turn_payload("")
     assert error["fatal"] is False
-    assert len(chunks) == 2
+    assert len(chunks) == 1
     assert chunks[0]["session_id"] == started["session_id"]
-    assert chunks[0]["text"] + chunks[1]["text"] == "".join(mock_turn_chunks(1, 0, ""))
-    assert chunks[0]["final"] is False
-    assert chunks[1]["final"] is True
+    assert chunks[0]["text"] == expected_text
+    assert chunks[0]["raw"] == expected_raw
+    assert chunks[0]["final"] is True
+    assert chunks[0]["t"] == 1.25
     websocket.push_disconnect()
     await asyncio.wait_for(task, timeout=2)
 
@@ -251,7 +260,7 @@ async def test_client_and_server_timestamp_modes() -> None:
     websocket.push_json({"type": "session.start", "model": "mock", "config": {"latency_ms": 0}})
     await wait_json(websocket, 1)
     websocket.push_json({"type": "input.append", "frame": JPEG_B64, "t": 9.0})
-    await wait_json(websocket, 3)
+    await wait_json(websocket, 2)
     websocket.push_disconnect()
     await asyncio.wait_for(task, timeout=2)
 
@@ -260,7 +269,7 @@ async def test_client_and_server_timestamp_modes() -> None:
     websocket.push_json({"type": "session.start", "model": "mock", "config": {"latency_ms": 0}})
     await wait_json(websocket, 1)
     websocket.push_json({"type": "input.append", "frame": JPEG_B64})
-    await wait_json(websocket, 3)
+    await wait_json(websocket, 2)
     websocket.push_disconnect()
     await asyncio.wait_for(task, timeout=2)
 
@@ -271,11 +280,15 @@ async def test_one_notification_drains_complete_audio_slices() -> None:
     websocket.push_json({"type": "session.start", "model": "mock", "config": {"latency_ms": 0}})
     await wait_json(websocket, 1)
     websocket.push_json({"type": "input.append", "audio": encode_media_b64(PCM_TWO_SLICES)})
-    messages = await wait_json(websocket, 5)
+    messages = await wait_json(websocket, 3)
     chunks = [message for message in messages if message["type"] == "response.chunk"]
-    assert len(chunks) == 4
+    assert len(chunks) == 2
+    assert chunks[0]["final"] is True
     assert chunks[1]["final"] is True
-    assert chunks[3]["final"] is True
+    assert chunks[0]["raw"] == "</silence>"
+    assert chunks[1]["raw"] == "</silence>"
+    assert chunks[0]["text"] == ""
+    assert chunks[1]["text"] == ""
     websocket.push_disconnect()
     await asyncio.wait_for(task, timeout=2)
 
@@ -367,11 +380,17 @@ async def test_channel_serializes_writes_and_times_out(
     channel = ClientChannel(websocket)
     channel.adopt_session_id("mock-1")
     await channel.send_error("one", fatal=False)
-    await channel.send_reply(Reply(text="two", raw="two", final=True, audio=b"\x00\x00"))
+    await channel.send_reply(
+        Reply(text="two", raw="two", final=True, audio=b"\x00\x00", t=1_726_700_000_123)
+    )
     payloads = [json.loads(item) for item in websocket.sent]
     assert payloads[0]["type"] == "error"
     assert payloads[1]["type"] == "response.chunk"
     assert payloads[1]["audio"] == encode_media_b64(b"\x00\x00")
+    assert payloads[1]["t"] == 1_726_700_000_123
+    await channel.send_reply(Reply(text="three", raw="three", final=True))
+    payloads = [json.loads(item) for item in websocket.sent]
+    assert "t" not in payloads[2]
     websocket.hang_send = True
     monkeypatch.setattr(channel_mod, "ORDINARY_WRITE_TIMEOUT_SECONDS", 0.05)
     with pytest.raises(SessionError, match="timed out"):
@@ -476,20 +495,21 @@ def test_mock_websocket_e2e_with_test_client() -> None:
             started = websocket.receive_json()
             assert started["type"] == "session.started"
             assert started["config"]["latency_ms"] == 0
+            sent_t = 1_726_700_000_123
             websocket.send_json(
                 {
                     "type": "input.append",
                     "frame": JPEG_B64,
                     "text": "What is on the desk?",
-                    "t": 1.5,
+                    "t": sent_t,
                 }
             )
-            first = websocket.receive_json()
-            second = websocket.receive_json()
-            assert first["type"] == "response.chunk"
-            assert second["final"] is True
-            assert first["session_id"] == started["session_id"]
-            expected = mock_turn_chunks(1, 0, "What is on the desk?")
-            assert first["text"] + second["text"] == expected[0] + expected[1]
-            assert first["raw"] == first["text"]
-            assert second["audio"] is not None
+            chunk = websocket.receive_json()
+            expected_text, expected_raw = mock_turn_payload("What is on the desk?")
+            assert chunk["type"] == "response.chunk"
+            assert chunk["final"] is True
+            assert chunk["session_id"] == started["session_id"]
+            assert chunk["t"] == sent_t
+            assert chunk["text"] == expected_text
+            assert chunk["raw"] == expected_raw
+            assert chunk["audio"] is not None
