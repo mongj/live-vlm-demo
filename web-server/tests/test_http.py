@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from live_vlm_server.adapters.gemini import GeminiAdapter, GeminiConfig
 from live_vlm_server.adapters.joyai import JoyAIAdapter, JoyAIConfig
 from live_vlm_server.adapters.mock import MockAdapter, MockConfig
-from live_vlm_server.main import create_app, resolve_runtime_settings
+from live_vlm_server.main import create_app, load_dotenv_file, resolve_runtime_settings
 
 SHIPPED = Path(__file__).resolve().parents[1] / "config.toml"
 
@@ -22,7 +23,7 @@ def test_health_and_catalog_payload_shape() -> None:
         body = listing.json()
         assert list(body) == ["models"]
         ids = [entry["id"] for entry in body["models"]]
-        assert ids == ["joyai-vl", "mock"]
+        assert ids == ["joyai-vl", "gemini-3-8-live", "mock"]
         for entry in body["models"]:
             assert set(entry) == {"id", "label", "config_schema"}
         mock = client.get("/v1/models/mock")
@@ -33,6 +34,10 @@ def test_health_and_catalog_payload_shape() -> None:
         joyai = client.get("/v1/models/joyai-vl")
         assert joyai.status_code == 200
         assert joyai.json()["config_schema"] == JoyAIConfig.model_json_schema()
+        gemini = client.get("/v1/models/gemini-3-8-live")
+        assert gemini.status_code == 200
+        assert gemini.json()["label"] == "Gemini 3.8 Live"
+        assert gemini.json()["config_schema"] == GeminiConfig.model_json_schema()
         missing = client.get("/v1/models/nope")
         assert missing.status_code == 404
 
@@ -41,6 +46,7 @@ def test_discovery_does_not_construct_adapters(monkeypatch: pytest.MonkeyPatch) 
     constructed: list[str] = []
     mock_init = MockAdapter.__init__
     joyai_init = JoyAIAdapter.__init__
+    gemini_init = GeminiAdapter.__init__
 
     def tracking_mock(self: MockAdapter, spec: object, raw_config: object) -> None:
         constructed.append("mock")
@@ -50,13 +56,19 @@ def test_discovery_does_not_construct_adapters(monkeypatch: pytest.MonkeyPatch) 
         constructed.append("joyai")
         joyai_init(self, spec, raw_config, **kwargs)
 
+    def tracking_gemini(self: GeminiAdapter, spec: object, raw_config: object, **kwargs: object) -> None:
+        constructed.append("gemini")
+        gemini_init(self, spec, raw_config, **kwargs)
+
     monkeypatch.setattr(MockAdapter, "__init__", tracking_mock)
     monkeypatch.setattr(JoyAIAdapter, "__init__", tracking_joyai)
+    monkeypatch.setattr(GeminiAdapter, "__init__", tracking_gemini)
     with TestClient(create_app(SHIPPED)) as client:
         client.get("/health")
         client.get("/v1/models")
         client.get("/v1/models/mock")
         client.get("/v1/models/joyai-vl")
+        client.get("/v1/models/gemini-3-8-live")
     assert constructed == []
 
 
@@ -91,3 +103,17 @@ def test_runtime_bind_defaults_overrides_and_invalid_ports() -> None:
         resolve_runtime_settings({"LIVE_VLM_PORT": "0"})
     with pytest.raises(ValueError, match="1 through 65535"):
         resolve_runtime_settings({"LIVE_VLM_PORT": "65536"})
+
+
+def test_dotenv_loads_missing_keys_only(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        'GEMINI_API_KEY="example"\nexport LIVE_VLM_PORT=9001\n# comment\n',
+        encoding="utf-8",
+    )
+    environ = {"LIVE_VLM_PORT": "8787"}
+    load_dotenv_file(path, environ)
+    assert environ["GEMINI_API_KEY"] == "example"
+    assert environ["LIVE_VLM_PORT"] == "8787"
+    load_dotenv_file(tmp_path / "missing.env", environ)
+    assert "LIVE_VLM_HOST" not in environ

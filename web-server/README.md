@@ -1,6 +1,6 @@
 # Live VLM gateway
 
-Python gateway for the live VLM playground. Clients discover Models over HTTP and run one Session per WebSocket. V1 ships **JoyAI-VL** (HTTP webinfer) and an in-process **Mock**.
+Python gateway for the live VLM playground. Clients discover Models over HTTP and run one Session per WebSocket. The shipped catalog is **JoyAI-VL** (HTTP webinfer), **Gemini 3.8 Live**, and an in-process **Mock**.
 
 The process is a trusted-user playground. It binds to localhost by default.
 
@@ -29,6 +29,7 @@ Defaults:
 | `LIVE_VLM_CONFIG` | `./config.toml` | Catalog file, relative to the working directory |
 | `LIVE_VLM_HOST` | `127.0.0.1` | Bind host |
 | `LIVE_VLM_PORT` | `8787` | Bind port |
+| `GEMINI_API_KEY` | unset | Required to start a Gemini Live Session. Loaded from the process environment or `web-server/.env`. |
 
 ```bash
 LIVE_VLM_PORT=9001 python -m live_vlm_server
@@ -139,6 +140,23 @@ Then Start a JoyAI Session:
 
 JoyAI ignores Audio. A successful visual turn returns one `response.chunk` with presentable `text`, exact `raw`, `audio: null`, and `final: true`.
 
+## Gemini 3.8 Live
+
+`config.toml` registers the Live API adapter. It does not take `base_url`.
+
+```toml
+[[models]]
+id = "gemini-3-8-live"
+adapter = "gemini"
+label = "Gemini 3.8 Live"
+```
+
+Put `GEMINI_API_KEY` in the environment or in `web-server/.env` (not committed). Restart the gateway after changing the catalog or `.env`.
+
+Start Config is `system_instruction` (optional) and `voice` (`Kore` by default). The adapter sends JPEG Frames (at most 1 fps), 16 kHz PCM Audio, and Text over `send_realtime_input`. Replies map Gemini audio chunks to `response.chunk.audio`, output transcriptions to `text`/`raw`, input transcriptions to `raw` as `[input] …`, and `turn_complete`/`interrupted` to `final: true`. Tools, custom VAD, and thinking config are not exposed.
+
+The playground sidebar lists this row from `GET /v1/models`. Camera Frames plus Text work with the current UI. Microphone PCM and Reply Audio playback are accepted on the wire if a Client sends or plays them; the default UI does not stream the mic yet.
+
 ## Live verification
 
 Offline Catalog discovery and Mock Sessions are covered by `python -m pytest`.
@@ -160,6 +178,10 @@ All messages are JSON text frames. JPEG and PCM use standard base64 (no data-URL
 | --- | --- | --- |
 | `session.start` | Client → server | Select one Model and start-only Config |
 | `session.started` | Server → Client | Binding completed; includes effective Config |
+| `session.end` | Client → server | Client wants a graceful stop; socket stays open |
+| `session.ended` | Server → Client | Adapter/buffer cleanup finished; Client may close |
 | `input.append` | Client → server | Feed with optional Frame, Audio, Text, and Frame timestamp |
 | `response.chunk` | Server → Client | One Reply |
 | `error` | Server → Client | Human-readable failure and `fatal` flag |
+
+Stop sends `session.end` and waits for `session.ended` before closing the socket. A dropped connection without `session.end` still ends the Session.

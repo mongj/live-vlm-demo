@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,30 @@ from .session import run_session
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_CONFIG = "./config.toml"
+
+
+def load_dotenv_file(
+    path: Path,
+    environ: MutableMapping[str, str] | None = None,
+) -> None:
+    env = os.environ if environ is None else environ
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key and key not in env:
+            env[key] = value
 
 
 def resolve_runtime_settings(
@@ -61,4 +85,4 @@ def create_app(config_path: str | Path) -> FastAPI:
     return app
 
 
-__all__ = ["CatalogError", "create_app", "resolve_runtime_settings"]
+__all__ = ["CatalogError", "create_app", "load_dotenv_file", "resolve_runtime_settings"]

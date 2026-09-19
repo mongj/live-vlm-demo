@@ -5,6 +5,11 @@ label = "JoyAI-VL-Interaction"
 base_url = "http://127.0.0.1:8070/v1"
 
 [[models]]
+id = "gemini-3-8-live"
+adapter = "gemini"
+label = "Gemini 3.8 Live"
+
+[[models]]
 id = "mock"
 adapter = "mock"
 label = "Mock"

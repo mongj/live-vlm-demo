@@ -52,5 +52,10 @@ def test_core_modules_have_no_application_imports() -> None:
 
 
 def test_adapters_do_not_import_session_catalog_or_channel() -> None:
-    for name in ("adapters/base.py", "adapters/mock.py", "adapters/joyai.py"):
+    for name in (
+        "adapters/base.py",
+        "adapters/mock.py",
+        "adapters/joyai.py",
+        "adapters/gemini.py",
+    ):
         assert _imported_roots(SRC / name) & ADAPTER_FORBIDDEN == set(), name

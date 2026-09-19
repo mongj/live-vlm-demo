@@ -11,6 +11,7 @@ from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel
 
 from .adapters.base import Adapter
+from .adapters.gemini import GeminiAdapter
 from .adapters.joyai import JoyAIAdapter
 from .adapters.mock import MockAdapter
 from .types import ModelSpec
@@ -20,6 +21,7 @@ MAX_MODEL_ID_LEN = 64
 KNOWN_ROW_KEYS = frozenset({"id", "adapter", "label", "base_url"})
 
 ADAPTER_REGISTRY: dict[str, type[Adapter[Any]]] = {
+    "gemini": GeminiAdapter,
     "joyai": JoyAIAdapter,
     "mock": MockAdapter,
 }
