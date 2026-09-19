@@ -31,11 +31,16 @@ yarn start
 ## Gateway URL
 
 `VLM_GATEWAY_URL` is the server-side FastAPI destination (default
-`http://127.0.0.1:8787`). It is used only by Next.js rewrites.
+`http://127.0.0.1:8787`). Node/SSR catalog fetches use this absolute URL.
+Next.js also rewrites `/v1/:path*` here for local `yarn dev` / `yarn start`.
 
-The browser requests `/v1/models` and opens `/v1/realtime` on the frontend's
-origin. Next.js proxies both HTTP and WebSocket traffic to FastAPI. An HTTPS
-frontend uses `wss`; an HTTP frontend uses `ws`. FastAPI can stay on loopback HTTP.
+The playground **Server Address** defaults to empty (this page). The browser
+then loads `/v1/models` and opens `/v1/realtime` on the frontend origin. An
+HTTPS page uses `wss`; HTTP uses `ws`. FastAPI can stay on loopback HTTP.
+
+To talk to a gateway on another host, fill in Server Address. For a long local
+Session against a gateway on this machine, `127.0.0.1:8787` still works and
+avoids Next.js rewrite WebSocket idle timeouts (~30s).
 
 Restart `yarn dev` or rebuild production after changing `VLM_GATEWAY_URL`.
 This replaces the old `NEXT_PUBLIC_VLM_GATEWAY_URL` setting; rename it in any
@@ -49,6 +54,8 @@ ssh -N -L 3001:127.0.0.1:3001 YOUR_HOST
 ```
 
 Open `http://localhost:3001`. The gateway's port 8787 does not need forwarding.
+
+Off-cluster Docker publishes only `127.0.0.1:3099`. See [../docker/README.md](../docker/README.md).
 
 ## Camera and HTTPS
 

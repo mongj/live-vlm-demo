@@ -30,6 +30,7 @@ Defaults:
 | `LIVE_VLM_HOST` | `127.0.0.1` | Bind host |
 | `LIVE_VLM_PORT` | `8787` | Bind port |
 | `GEMINI_API_KEY` | unset | Required to start a Gemini Live Session. Loaded from the process environment or `web-server/.env`. |
+| `JOYAI_BASE_URL` | unset | Optional override of every JoyAI row's `base_url` in the catalog. Accepts `http(s)://host:port` or `.../v1`. |
 
 ```bash
 LIVE_VLM_PORT=9001 python -m live_vlm_server
@@ -101,6 +102,9 @@ base_url = "http://127.0.0.1:8070/v1"
 ```
 
 Edit `base_url` when the tunnel or local port differs. It must be HTTP(S) and end in `/v1`.
+`JOYAI_BASE_URL` overrides that field without editing the file.
+
+Off-cluster Docker uses `host.docker.internal` instead of `127.0.0.1`. See [../docker/README.md](../docker/README.md).
 
 The PBS launcher ([scripts/joyai.pbs](../scripts/joyai.pbs)) uses these ports:
 

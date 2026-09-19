@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -115,11 +116,29 @@ def _parse_row(row: Mapping[str, Any], seen_ids: set[str]) -> ModelSpec:
     return ModelSpec(id=model_id, adapter=adapter, label=label, base_url=base_url)
 
 
+def _apply_joyai_base_url_override(
+    spec: ModelSpec,
+    environ: Mapping[str, str],
+) -> ModelSpec:
+    if spec.adapter != "joyai":
+        return spec
+    override = environ.get("JOYAI_BASE_URL", "").strip()
+    if not override:
+        return spec
+    parsed = urlparse(override)
+    path = parsed.path.rstrip("/")
+    if path in {"", "/"}:
+        override = urlunparse((parsed.scheme, parsed.netloc, "/v1", "", "", ""))
+    return replace(spec, base_url=normalize_joyai_base_url(override))
+
+
 def load_catalog(
     path: Path,
     registry: dict[str, type[Adapter[Any]]] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> Catalog:
     resolved = Path(path)
+    env = os.environ if environ is None else environ
     try:
         raw = resolved.read_bytes()
     except FileNotFoundError as exc:
@@ -138,7 +157,7 @@ def load_catalog(
     for row in rows:
         if not isinstance(row, dict):
             raise CatalogError("Each [[models]] row must be a table")
-        spec = _parse_row(row, seen)
+        spec = _apply_joyai_base_url_override(_parse_row(row, seen), env)
         seen.add(spec.id)
         specs.append(spec)
     return Catalog(specs=tuple(specs), registry=registry or ADAPTER_REGISTRY)

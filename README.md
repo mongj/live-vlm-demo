@@ -99,6 +99,16 @@ tail -n 50 -F joyai/logs/webinfer.log
 catalog keeps `base_url = "http://127.0.0.1:8070/v1"`. The Mac still forwards only
 the frontend port.
 
+## Docker (off-cluster)
+
+On a machine without Anaconda, with JoyAI ports forwarded to that host:
+
+```bash
+docker compose up -d --build
+```
+
+Only `127.0.0.1:3099` is published. See [docker/README.md](docker/README.md).
+
 ## Verify
 
 ```bash

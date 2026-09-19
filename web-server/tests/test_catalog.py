@@ -13,7 +13,7 @@ SHIPPED = Path(__file__).resolve().parents[1] / "config.toml"
 
 
 def test_shipped_catalog_contains_joyai_gemini_and_mock() -> None:
-    catalog = load_catalog(SHIPPED)
+    catalog = load_catalog(SHIPPED, environ={})
     assert [spec.id for spec in catalog.specs] == ["joyai-vl", "gemini-3-8-live", "mock"]
     joyai = catalog.get("joyai-vl")
     gemini = catalog.get("gemini-3-8-live")
@@ -135,7 +135,7 @@ base_url = "https://127.0.0.1:8070/v1/"
 """,
         encoding="utf-8",
     )
-    catalog = load_catalog(config)
+    catalog = load_catalog(config, environ={})
     spec = catalog.get("joyai-vl")
     assert spec is not None
     assert spec.base_url == "https://127.0.0.1:8070/v1"
@@ -143,3 +143,28 @@ base_url = "https://127.0.0.1:8070/v1/"
         normalize_joyai_base_url("ftp://127.0.0.1/v1")
     with pytest.raises(CatalogError, match="/v1"):
         normalize_joyai_base_url("http://127.0.0.1:8070/v1/chat")
+
+
+def test_joyai_base_url_env_override(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[[models]]
+id = "joyai-vl"
+adapter = "joyai"
+label = "JoyAI"
+base_url = "http://127.0.0.1:8070/v1"
+""",
+        encoding="utf-8",
+    )
+    catalog = load_catalog(
+        config,
+        environ={"JOYAI_BASE_URL": "http://host.docker.internal:8070"},
+    )
+    spec = catalog.get("joyai-vl")
+    assert spec is not None
+    assert spec.base_url == "http://host.docker.internal:8070/v1"
+    unchanged = load_catalog(config, environ={})
+    original = unchanged.get("joyai-vl")
+    assert original is not None
+    assert original.base_url == "http://127.0.0.1:8070/v1"

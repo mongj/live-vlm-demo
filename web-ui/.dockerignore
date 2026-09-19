@@ -1,0 +1,11 @@
+.next
+node_modules
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.log
+coverage
+.DS_Store
+CLAUDE.md
