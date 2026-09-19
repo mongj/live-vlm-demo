@@ -10,6 +10,7 @@ import {
 } from "@/lib/capture";
 import { DEFAULT_GATEWAY_ADDRESS, getRealtimeUrl, parseGatewayAddress } from "@/lib/gateway";
 import { defaultsFromSchema } from "@/lib/json-schema";
+import { encodePcmBase64, PcmCapture, PcmPlayer } from "@/lib/pcm";
 import { encodeClientMessage, parseServerMessage } from "@/lib/protocol";
 import { useEffect, useRef, useState, type RefObject } from "react";
 
@@ -76,6 +77,13 @@ const CAMERA_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
   height: { ideal: 720 },
 };
 
+const SESSION_END_ACK_TIMEOUT_MS = 8_000;
+
+type SessionEndWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+
 function hasPresentableText(text: string): boolean {
   return text.trim().length > 0;
 }
@@ -132,6 +140,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const socketRef = useRef<WebSocket | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
+  const pcmCaptureRef = useRef<PcmCapture | null>(null);
+  const pcmPlayerRef = useRef<PcmPlayer | null>(null);
   const frameTimerRef = useRef<number | null>(null);
   const lastSentTRef = useRef<number | null>(null);
   const generationRef = useRef(0);
@@ -144,6 +154,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const micInFlightRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
   const streamingDebugIdRef = useRef<string | null>(null);
+  const stoppingRef = useRef(false);
+  const endingRef = useRef<SessionEndWaiter | null>(null);
 
   const [catalogStatus, setCatalogStatus] = useState<"loading" | "ready" | "error">(
     initialCatalogError ? "error" : initialModels.length > 0 ? "ready" : "error"
@@ -235,9 +247,80 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function stopMicrophoneTracks() {
+    stopPcmCapture();
     const stream = audioStreamRef.current;
     audioStreamRef.current = null;
     stopMediaStream(stream);
+  }
+
+  function stopPcmCapture() {
+    pcmCaptureRef.current?.stop();
+    pcmCaptureRef.current = null;
+  }
+
+  function stopPcmPlayer() {
+    pcmPlayerRef.current?.close();
+    pcmPlayerRef.current = null;
+  }
+
+  function ensurePcmPlayer(): PcmPlayer {
+    if (!pcmPlayerRef.current) {
+      pcmPlayerRef.current = new PcmPlayer();
+    }
+    return pcmPlayerRef.current;
+  }
+
+  function sendAudio(pcm: Uint8Array) {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !liveRef.current) {
+      return;
+    }
+    if (pcm.byteLength < 2) {
+      return;
+    }
+    socket.send(
+      encodeClientMessage({
+        type: "input.append",
+        audio: encodePcmBase64(pcm),
+        t: Date.now(),
+      })
+    );
+  }
+
+  async function attachPcmCapture(stream: MediaStream) {
+    const capture = new PcmCapture(stream, sendAudio);
+    pcmCaptureRef.current = capture;
+    try {
+      await capture.start();
+      if (pcmCaptureRef.current !== capture) {
+        capture.stop();
+      }
+    } catch (error) {
+      if (pcmCaptureRef.current !== capture) {
+        return;
+      }
+      pcmCaptureRef.current = null;
+      capture.stop();
+      setMicError(mediaDeviceErrorMessage(error, "microphone"));
+    }
+  }
+
+  function syncPcmCapture() {
+    const stream = audioStreamRef.current;
+    if (liveRef.current && stream) {
+      if (pcmCaptureRef.current) {
+        return;
+      }
+      void attachPcmCapture(stream);
+      return;
+    }
+    stopPcmCapture();
+  }
+
+  function playReplyAudio(audio: string) {
+    const player = ensurePcmPlayer();
+    player.enqueue(audio);
+    void player.resume();
   }
 
   function stopFrameTimer() {
@@ -277,6 +360,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   function cleanupSession() {
     stopFrameTimer();
     closeSocket();
+    stopPcmCapture();
+    stopPcmPlayer();
     resetTransientState();
   }
 
@@ -369,6 +454,15 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       return;
     }
 
+    if (message.type === "session.ended") {
+      endingRef.current?.resolve();
+      return;
+    }
+
+    if (stoppingRef.current) {
+      return;
+    }
+
     switch (message.type) {
       case "session.started":
         liveRef.current = true;
@@ -377,8 +471,13 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         setFatalError(null);
         setRecoverableError(null);
         startFrameLoop();
+        syncPcmCapture();
+        void ensurePcmPlayer().resume();
         break;
       case "response.chunk": {
+        if (message.audio) {
+          playReplyAudio(message.audio);
+        }
         const chunk = message.text ?? "";
         const presentable = hasPresentableText(chunk);
         const rawChunk = message.raw ?? "";
@@ -572,7 +671,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         throw new DOMException("Microphone access requires a secure browser context", "SecurityError");
       }
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: {
+          channelCount: { ideal: 1 },
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
         video: false,
       });
       if (requestId !== micRequestIdRef.current) {
@@ -582,6 +685,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       audioStreamRef.current = stream;
       micInFlightRef.current = false;
       setMicOn(true);
+      syncPcmCapture();
+      void pcmPlayerRef.current?.resume();
     } catch (error) {
       if (requestId !== micRequestIdRef.current) {
         return;
@@ -633,11 +738,16 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       return;
     }
 
+    stopPcmPlayer();
+    const player = new PcmPlayer();
+    pcmPlayerRef.current = player;
+    void player.resume();
+
     const socket = new WebSocket(getRealtimeUrl(serverAddressRef.current));
     socketRef.current = socket;
 
     socket.onopen = () => {
-      if (generation !== generationRef.current) {
+      if (generation !== generationRef.current || stoppingRef.current) {
         return;
       }
       socket.send(
@@ -660,7 +770,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     };
 
     socket.onerror = () => {
-      if (generation !== generationRef.current) {
+      if (endingRef.current) {
+        endingRef.current.reject(new Error("WebSocket connection failed"));
+        return;
+      }
+      if (generation !== generationRef.current || stoppingRef.current) {
         return;
       }
       setFatalError("WebSocket connection failed");
@@ -668,7 +782,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     };
 
     socket.onclose = () => {
-      if (generation !== generationRef.current) {
+      if (endingRef.current) {
+        endingRef.current.reject(new Error("Session closed before session.ended"));
+        return;
+      }
+      if (generation !== generationRef.current || stoppingRef.current) {
         return;
       }
       setFatalError((current) => current ?? "Session ended");
@@ -677,10 +795,83 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function stop() {
-    generationRef.current += 1;
+    void endSession();
+  }
+
+  async function endSession() {
+    if (stoppingRef.current) {
+      return;
+    }
+    stoppingRef.current = true;
     setRecoverableError(null);
     setFatalError(null);
-    cleanupSession();
+    stopFrameTimer();
+    liveRef.current = false;
+    stopPcmCapture();
+    stopPcmPlayer();
+
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      generationRef.current += 1;
+      closeSocket();
+      resetTransientState();
+      stoppingRef.current = false;
+      return;
+    }
+
+    let clearWaiter: (() => void) | undefined;
+    const ended = new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timeoutId = window.setTimeout(() => {
+        if (endingRef.current === waiter) {
+          endingRef.current = null;
+        }
+        if (!settled) {
+          settled = true;
+          reject(new Error("Timed out waiting for session.ended"));
+        }
+      }, SESSION_END_ACK_TIMEOUT_MS);
+      const finish = (action: () => void) => {
+        window.clearTimeout(timeoutId);
+        if (endingRef.current === waiter) {
+          endingRef.current = null;
+        }
+        if (!settled) {
+          settled = true;
+          action();
+        }
+      };
+      const waiter: SessionEndWaiter = {
+        resolve: () => {
+          finish(resolve);
+        },
+        reject: (error) => {
+          finish(() => {
+            reject(error);
+          });
+        },
+      };
+      clearWaiter = () => {
+        window.clearTimeout(timeoutId);
+        if (endingRef.current === waiter) {
+          endingRef.current = null;
+        }
+      };
+      endingRef.current = waiter;
+    });
+
+    try {
+      socket.send(encodeClientMessage({ type: "session.end" }));
+      await ended;
+    } catch (error) {
+      setFatalError(error instanceof Error ? error.message : "Session end failed");
+    } finally {
+      clearWaiter?.();
+      generationRef.current += 1;
+      closeSocket();
+      resetTransientState();
+      stoppingRef.current = false;
+    }
   }
 
   async function sendText(text: string) {
@@ -711,6 +902,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         setRecoverableError("The Session is not ready to send a Feed");
         return;
       }
+      void pcmPlayerRef.current?.resume();
       setMessages((current) => [
         ...current,
         {
@@ -729,6 +921,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       generationRef.current += 1;
       cameraRequestIdRef.current += 1;
       micRequestIdRef.current += 1;
+      endingRef.current?.reject(new Error("unmounted"));
       cleanupSession();
       stopVideoPreview();
       stopMicrophoneTracks();

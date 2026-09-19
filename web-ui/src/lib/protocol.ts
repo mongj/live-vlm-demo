@@ -4,6 +4,10 @@ export type SessionStartMessage = {
   config: Record<string, unknown>;
 };
 
+export type SessionEndMessage = {
+  type: "session.end";
+};
+
 export type InputAppendMessage = {
   type: "input.append";
   frame?: string | null;
@@ -13,13 +17,18 @@ export type InputAppendMessage = {
   t?: number | null;
 };
 
-export type ClientMessage = SessionStartMessage | InputAppendMessage;
+export type ClientMessage = SessionStartMessage | SessionEndMessage | InputAppendMessage;
 
 export type SessionStartedMessage = {
   type: "session.started";
   session_id: string;
   model: string;
   config: Record<string, unknown>;
+};
+
+export type SessionEndedMessage = {
+  type: "session.ended";
+  session_id: string | null;
 };
 
 export type ResponseChunkMessage = {
@@ -40,7 +49,7 @@ export type ErrorMessage = {
   message: string;
 };
 
-export type ServerMessage = SessionStartedMessage | ResponseChunkMessage | ErrorMessage;
+export type ServerMessage = SessionStartedMessage | SessionEndedMessage | ResponseChunkMessage | ErrorMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -78,6 +87,16 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
         session_id: sessionId,
         model,
         config: value.config,
+      };
+    }
+    case "session.ended": {
+      const sessionId = value.session_id;
+      if (sessionId !== undefined && sessionId !== null && typeof sessionId !== "string") {
+        return null;
+      }
+      return {
+        type: "session.ended",
+        session_id: typeof sessionId === "string" ? sessionId : null,
       };
     }
     case "response.chunk": {

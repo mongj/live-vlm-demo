@@ -6,7 +6,12 @@ from collections.abc import MutableMapping
 from typing import Any, Protocol
 
 from .codecs import encode_media_b64
-from .protocol import ErrorMessage, ResponseChunkMessage, SessionStartedMessage
+from .protocol import (
+    ErrorMessage,
+    ResponseChunkMessage,
+    SessionEndedMessage,
+    SessionStartedMessage,
+)
 from .types import Reply, SessionError
 
 ORDINARY_WRITE_TIMEOUT_SECONDS = 5.0
@@ -74,6 +79,10 @@ class ClientChannel:
             fatal=True,
             message=message,
         )
+        await self._send(payload.model_dump(), TERMINAL_WRITE_TIMEOUT_SECONDS)
+
+    async def send_ended(self) -> None:
+        payload = SessionEndedMessage(session_id=self.session_id)
         await self._send(payload.model_dump(), TERMINAL_WRITE_TIMEOUT_SECONDS)
 
     async def close_socket(self, code: int) -> None:

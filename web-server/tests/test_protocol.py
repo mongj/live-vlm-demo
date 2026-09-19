@@ -13,7 +13,13 @@ from live_vlm_server.codecs import (
     decode_pcm_b64,
     encode_media_b64,
 )
-from live_vlm_server.protocol import InputAppendMessage, SessionStartMessage, parse_inbound
+from live_vlm_server.protocol import (
+    InputAppendMessage,
+    SessionEndMessage,
+    SessionEndedMessage,
+    SessionStartMessage,
+    parse_inbound,
+)
 from live_vlm_server.types import SessionError
 
 MIN_JPEG = b"\xff\xd8\xff\xd9"
@@ -24,6 +30,25 @@ def test_parse_start_defaults_config_to_empty_object() -> None:
     assert isinstance(parsed, SessionStartMessage)
     assert parsed.model == "mock"
     assert parsed.config == {}
+
+
+def test_parse_session_end() -> None:
+    parsed = parse_inbound('{"type": "session.end"}')
+    assert isinstance(parsed, SessionEndMessage)
+    with pytest.raises(SessionError) as extra:
+        parse_inbound('{"type": "session.end", "nope": 1}')
+    assert extra.value.fatal is False
+
+
+def test_session_ended_wire() -> None:
+    assert SessionEndedMessage(session_id="mock-1").model_dump() == {
+        "type": "session.ended",
+        "session_id": "mock-1",
+    }
+    assert SessionEndedMessage(session_id=None).model_dump() == {
+        "type": "session.ended",
+        "session_id": None,
+    }
 
 
 def test_parse_feed_optional_fields_and_timestamp() -> None:

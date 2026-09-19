@@ -64,7 +64,7 @@ Open `http://localhost:3001`. The gateway's port 8787 does not need forwarding.
 2. Start requests camera permission, shows the live preview, opens `/v1/realtime`, and sends `session.start`.
 3. Feeds start only after `session.started`. Frames are JPEG at about 1 fps, fitted within 1280×720.
 4. Submitting Text captures a fresh Frame and sends both in one `input.append`.
-5. Stop closes the socket, stops camera tracks, and clears timers. This version does not reconnect automatically.
+5. Stop sends `session.end`, waits for `session.ended`, then closes the socket and clears Session timers. A timeout still closes and surfaces an error. This version does not reconnect automatically.
 
 ## Layout
 

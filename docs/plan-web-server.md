@@ -168,11 +168,13 @@ All messages are JSON text frames. Binary messages are unsupported. JPEG and PCM
 | ----------------- | --------------- | ---------------------------------------------------------- |
 | `session.start`   | Client → server | Select one Model and start-only Config                     |
 | `session.started` | Server → Client | Binding completed; includes effective Config               |
+| `session.end`     | Client → server | Client wants a graceful stop; socket stays open            |
+| `session.ended`   | Server → Client | Adapter/buffer cleanup finished; Client may close          |
 | `input.append`    | Client → server | Feed with optional Frame, Audio, Text, and Frame timestamp |
 | `response.chunk`  | Server → Client | One Reply                                                  |
 | `error`           | Server → Client | Human-readable failure and `fatal` flag                    |
 
-Socket close ends the Session. The v1 message set is exactly the five types above.
+A graceful Stop sends `session.end` and waits for `session.ended` before closing the socket. Abrupt disconnect without `session.end` still ends the Session. The v1 message set is exactly the seven types above.
 
 ### 4.1 Wire examples
 
@@ -230,6 +232,19 @@ Socket close ends the Session. The v1 message set is exactly the five types abov
 }
 ```
 
+```json
+{
+  "type": "session.end"
+}
+```
+
+```json
+{
+  "type": "session.ended",
+  "session_id": "joyai-vl-a1b2c3d4"
+}
+```
+
 `config` defaults to an empty object. Feed fields may be omitted or null. `session.started.config` contains all effective defaults. Every Reply carries the bound Session ID; Errors before binding use null.
 
 ### 4.2 Codecs, time, and validation
@@ -251,7 +266,7 @@ Frames arrive in capture order from a trusted Client. For the whole Session, the
 - The Client uses one timestamp mode throughout a Session. The server does not track or enforce that choice; arrival order controls buffering.
 - `t` annotates the Frame only. Audio is ordered by sample arrival; Text does not use it.
 
-Use Pydantic models with `ConfigDict(extra="forbid")`, literal `type` strings, and one discriminated inbound union (`session.start` / `input.append`). The parser maps malformed JSON, unknown message types, and Pydantic validation failures to the same recoverable Error path. Require `t` to be finite and non-negative when supplied.
+Use Pydantic models with `ConfigDict(extra="forbid")`, literal `type` strings, and one discriminated inbound union (`session.start` / `session.end` / `input.append`). The parser maps malformed JSON, unknown message types, and Pydantic validation failures to the same recoverable Error path. Require `t` to be finite and non-negative when supplied.
 
 ### 4.3 Reply meaning
 
@@ -292,7 +307,7 @@ After acknowledgement there are **three owned worker tasks** (receiver, feeder, 
 
 The coordinator uses `asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)`. Once any worker finishes:
 
-1. Inspect every completed outcome. A normal receiver completion means the Client disconnected; a feeder/forwarder completion or worker exception is terminal.
+1. Inspect every completed outcome. A normal receiver completion means the Client disconnected or sent `session.end`; a feeder/forwarder completion or worker exception is terminal.
 2. Cancel every remaining task and gather all task outcomes with `return_exceptions=True`.
 3. Inspect the gathered outcomes as well, log every unexpected failure, and retain one useful terminal message.
 
@@ -335,11 +350,12 @@ This handles multiple complete Audio slices represented by one event and input a
 The outer `finally` runs for open errors, acknowledgement failures, worker failures, normal disconnect, and cancellation:
 
 1. Cancel/gather owned tasks, even if startup never reached task creation.
-2. Close any retained adapter, including partially opened ones. JoyAI bounds its best-effort reset to two seconds and closes its HTTP client in a `finally` (§8). Log cleanup failures without replacing the primary failure.
+2. Close any retained adapter, including partially opened ones. JoyAI bounds its best-effort reset to two seconds and closes its HTTP client in a `finally` (§8). Log cleanup failures without replacing the primary failure. Drop Session buffers while the socket is still open.
 3. After producers have stopped, attempt a terminal Error if one exists and the Client may still be writable. Bound this attempt to two seconds.
-4. Attempt socket close in a separate `finally`, also bounded to two seconds; it must still run if error delivery fails. Drop Session buffers and references.
+4. If the Client sent `session.end`, send `session.ended` while the socket is still open, also bounded to two seconds.
+5. Attempt socket close in a separate attempt, also bounded to two seconds; it must still run if Error or ACK delivery fails.
 
-Use close code 1000 for normal termination and 1011 for a terminal server/session failure. Ordinary Client disconnect produces no Error. Preserve `CancelledError` after cleanup.
+Use close code 1000 for normal termination and 1011 for a terminal server/session failure. Ordinary Client disconnect produces no Error and no `session.ended`. Unexpected close failures log ERROR with a traceback. Preserve `CancelledError` after cleanup.
 
 Error delivery is best-effort. Cleanup runs independently of send, lock, or peer-acknowledgement outcomes. Gateway task cancellation does not cancel an upstream GPU generation that webinfer has already started.
 
@@ -520,7 +536,8 @@ Use `SessionError(message, fatal=True)` for deliberate application failures. Err
 | Unsupported modality                                         | Quiet-drop; no Error                                 |
 | One failed JoyAI HTTP turn                                   | Recoverable Error; consumed media is not retried     |
 | Reply iterator EOF/failure or unexpected worker exception    | Fatal; cancel siblings and clean up                  |
-| Ordinary Client disconnect                                   | Normal cleanup without an Error                      |
+| Ordinary Client disconnect                                   | Normal cleanup without an Error or `session.ended`   |
+| Client `session.end`                                         | Cleanup while open, `session.ended`, then close 1000 |
 | Error write/close failure                                    | Log as appropriate; still run independent cleanup    |
 
 A failed recoverable Error write terminates its worker and triggers coordinator cleanup. Cancellation propagates after cleanup.

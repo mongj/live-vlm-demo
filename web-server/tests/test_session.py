@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -36,6 +37,8 @@ class FakeWebSocket:
         self.closed_with: int | None = None
         self.hang_send = False
         self.fail_send = False
+        self.fail_close = False
+        self.on_send: Callable[[str], None] | None = None
 
     async def accept(self) -> None:
         return None
@@ -48,9 +51,13 @@ class FakeWebSocket:
             await asyncio.Event().wait()
         if self.fail_send:
             raise RuntimeError("send failed")
+        if self.on_send is not None:
+            self.on_send(data)
         self.sent.append(data)
 
     async def close(self, code: int = 1000) -> None:
+        if self.fail_close:
+            raise RuntimeError("peer gone")
         self.closed_with = code
 
     def push_json(self, payload: dict[str, Any]) -> None:
@@ -73,6 +80,19 @@ async def wait_json(websocket: FakeWebSocket, count: int, timeout: float = 2.0) 
             return [json.loads(item) for item in websocket.sent[:count]]
         await asyncio.sleep(0.01)
     raise AssertionError(f"wanted {count} messages, got {websocket.sent!r}")
+
+
+async def wait_type(
+    websocket: FakeWebSocket, message_type: str, timeout: float = 2.0
+) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        for item in websocket.sent:
+            payload = json.loads(item)
+            if isinstance(payload, dict) and payload.get("type") == message_type:
+                return payload
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"wanted {message_type}, got {websocket.sent!r}")
 
 
 def mock_catalog() -> Catalog:
@@ -176,7 +196,9 @@ def _reset_scripted() -> None:
     ScriptedAdapter.reset()
 
 
-async def test_acknowledged_start_effective_config_and_normal_close() -> None:
+async def test_acknowledged_start_effective_config_and_normal_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     websocket = FakeWebSocket()
     task = asyncio.create_task(run_session(websocket, mock_catalog()))
     websocket.push_json({"type": "session.start", "model": "mock", "config": {}})
@@ -186,9 +208,91 @@ async def test_acknowledged_start_effective_config_and_normal_close() -> None:
     assert started["config"] == {"latency_ms": 150}
     assert started["session_id"].startswith("mock-")
     websocket.push_disconnect()
-    await asyncio.wait_for(task, timeout=2)
+    with caplog.at_level(logging.INFO, logger="live_vlm_server.session"):
+        await asyncio.wait_for(task, timeout=2)
     assert websocket.closed_with == 1000
     assert all(json.loads(item)["type"] != "error" for item in websocket.sent)
+    assert all(json.loads(item)["type"] != "session.ended" for item in websocket.sent)
+    assert f"WebSocket closed session_id={started['session_id']}" in caplog.text
+    assert "WebSocket close failed" not in caplog.text
+
+
+async def test_session_end_acks_after_adapter_cleanup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    websocket = FakeWebSocket()
+    task = asyncio.create_task(run_session(websocket, scripted_catalog()))
+    websocket.push_json({"type": "session.start", "model": "test"})
+    started = (await wait_json(websocket, 1))[0]
+    adapter = ScriptedAdapter.instances[-1]
+    ended_after_close: list[bool] = []
+
+    def on_send(data: str) -> None:
+        payload = json.loads(data)
+        if payload["type"] == "session.ended":
+            ended_after_close.append(adapter.closed)
+
+    websocket.on_send = on_send
+    websocket.push_json({"type": "session.end"})
+    with caplog.at_level(logging.INFO, logger="live_vlm_server.session"):
+        ended = await wait_type(websocket, "session.ended")
+        assert ended["session_id"] == started["session_id"]
+        await asyncio.wait_for(task, timeout=2)
+    assert ended_after_close == [True]
+    assert adapter.closed is True
+    assert websocket.closed_with == 1000
+    assert all(json.loads(item)["type"] != "error" for item in websocket.sent)
+    sent_types = [json.loads(item)["type"] for item in websocket.sent]
+    assert sent_types[-1] == "session.ended"
+    assert "WebSocket close failed" not in caplog.text
+    assert f"WebSocket closed session_id={started['session_id']}" in caplog.text
+
+
+async def test_session_end_before_start() -> None:
+    websocket = FakeWebSocket()
+    task = asyncio.create_task(run_session(websocket, mock_catalog()))
+    websocket.push_json({"type": "session.end"})
+    ended = (await wait_json(websocket, 1))[0]
+    assert ended == {"type": "session.ended", "session_id": None}
+    await asyncio.wait_for(task, timeout=2)
+    assert websocket.closed_with == 1000
+
+
+async def test_session_end_after_feed_preserves_consume_once() -> None:
+    websocket = FakeWebSocket()
+    task = asyncio.create_task(run_session(websocket, mock_catalog()))
+    websocket.push_json({"type": "session.start", "model": "mock", "config": {"latency_ms": 0}})
+    started = (await wait_json(websocket, 1))[0]
+    sent_t = 1_726_700_000_123
+    websocket.push_json({"type": "input.append", "frame": JPEG_B64, "t": sent_t})
+    chunk = await wait_type(websocket, "response.chunk")
+    expected_text, expected_raw = mock_turn_payload("")
+    assert chunk["session_id"] == started["session_id"]
+    assert chunk["t"] == sent_t
+    assert chunk["text"] == expected_text
+    assert chunk["raw"] == expected_raw
+    assert chunk["final"] is True
+    websocket.push_json({"type": "session.end"})
+    ended = await wait_type(websocket, "session.ended")
+    assert ended["session_id"] == started["session_id"]
+    await asyncio.wait_for(task, timeout=2)
+    assert websocket.closed_with == 1000
+
+
+async def test_websocket_close_failure_is_logged_loudly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    websocket = FakeWebSocket()
+    websocket.fail_close = True
+    task = asyncio.create_task(run_session(websocket, mock_catalog()))
+    websocket.push_json({"type": "session.start", "model": "mock", "config": {}})
+    await wait_json(websocket, 1)
+    websocket.push_disconnect()
+    with caplog.at_level(logging.INFO, logger="live_vlm_server.session"):
+        await asyncio.wait_for(task, timeout=2)
+    assert "WebSocket close failed" in caplog.text
+    assert "peer gone" in caplog.text
+    assert "WebSocket closed session_id=" not in caplog.text
 
 
 async def test_protocol_errors_second_start_and_feed_before_start() -> None:
@@ -383,14 +487,16 @@ async def test_channel_serializes_writes_and_times_out(
     await channel.send_reply(
         Reply(text="two", raw="two", final=True, audio=b"\x00\x00", t=1_726_700_000_123)
     )
+    await channel.send_ended()
     payloads = [json.loads(item) for item in websocket.sent]
     assert payloads[0]["type"] == "error"
     assert payloads[1]["type"] == "response.chunk"
     assert payloads[1]["audio"] == encode_media_b64(b"\x00\x00")
     assert payloads[1]["t"] == 1_726_700_000_123
+    assert payloads[2] == {"type": "session.ended", "session_id": "mock-1"}
     await channel.send_reply(Reply(text="three", raw="three", final=True))
     payloads = [json.loads(item) for item in websocket.sent]
-    assert "t" not in payloads[2]
+    assert "t" not in payloads[3]
     websocket.hang_send = True
     monkeypatch.setattr(channel_mod, "ORDINARY_WRITE_TIMEOUT_SECONDS", 0.05)
     with pytest.raises(SessionError, match="timed out"):
@@ -513,3 +619,17 @@ def test_mock_websocket_e2e_with_test_client() -> None:
             assert chunk["text"] == expected_text
             assert chunk["raw"] == expected_raw
             assert chunk["audio"] is not None
+
+
+def test_session_end_websocket_e2e_with_test_client() -> None:
+    with TestClient(create_app(SHIPPED)) as client:
+        with client.websocket_connect("/v1/realtime") as websocket:
+            websocket.send_json(
+                {"type": "session.start", "model": "mock", "config": {"latency_ms": 0}}
+            )
+            started = websocket.receive_json()
+            assert started["type"] == "session.started"
+            websocket.send_json({"type": "session.end"})
+            ended = websocket.receive_json()
+            assert ended["type"] == "session.ended"
+            assert ended["session_id"] == started["session_id"]

@@ -14,7 +14,12 @@ from .adapters.base import Adapter
 from .buffers import AudioBuffer, FrameBuffer
 from .channel import ClientChannel, ClientSocket
 from .codecs import decode_jpeg_b64, decode_pcm_b64
-from .protocol import InputAppendMessage, SessionStartMessage, parse_inbound
+from .protocol import (
+    InputAppendMessage,
+    SessionEndMessage,
+    SessionStartMessage,
+    parse_inbound,
+)
 from .types import ModelSpec, SessionError, VideoFrame
 
 logger = logging.getLogger(__name__)
@@ -25,6 +30,10 @@ ERROR_CLOSE_CODE = 1011
 
 
 class ClientDisconnected(Exception):
+    pass
+
+
+class ClientEnded(Exception):
     pass
 
 
@@ -46,6 +55,7 @@ class Session:
     frames: FrameBuffer
     audio: AudioBuffer
     feed_ready: asyncio.Event
+    end_requested: bool = False
 
     def ingest(self, feed: InputAppendMessage) -> None:
         if feed.frame is not None and self.adapter.max_frames_per_request > 0:
@@ -72,6 +82,7 @@ async def run_session(websocket: ClientSocket, catalog: SessionCatalog) -> None:
     terminal: SessionError | None = None
     close_code = NORMAL_CLOSE_CODE
     cancelled = False
+    client_ended = False
     try:
         try:
             start = await _read_start(websocket, channel)
@@ -112,8 +123,13 @@ async def run_session(websocket: ClientSocket, catalog: SessionCatalog) -> None:
                 asyncio.create_task(_forwarder(session, channel), name="forwarder"),
             ]
             terminal = await _coordinate(tasks)
+            if session is not None and session.end_requested:
+                client_ended = True
             if terminal is not None:
                 close_code = ERROR_CLOSE_CODE
+        except ClientEnded:
+            client_ended = True
+            close_code = NORMAL_CLOSE_CODE
         except ClientDisconnected:
             close_code = NORMAL_CLOSE_CODE
         except SessionError as exc:
@@ -126,7 +142,9 @@ async def run_session(websocket: ClientSocket, catalog: SessionCatalog) -> None:
     except asyncio.CancelledError:
         cancelled = True
         close_code = ERROR_CLOSE_CODE
-    await _cleanup(tasks, adapter, session, channel, terminal, close_code)
+    await _cleanup(
+        tasks, adapter, session, channel, terminal, close_code, client_ended
+    )
     if cancelled:
         raise asyncio.CancelledError
 
@@ -165,6 +183,8 @@ async def _read_start(
         if isinstance(parsed, InputAppendMessage):
             await channel.send_error("Feed before Start is ignored", fatal=False)
             continue
+        if isinstance(parsed, SessionEndMessage):
+            raise ClientEnded
         return parsed
 
 
@@ -189,6 +209,9 @@ async def _receiver(
         if isinstance(parsed, SessionStartMessage):
             await channel.send_error("Session already started", fatal=False)
             continue
+        if isinstance(parsed, SessionEndMessage):
+            session.end_requested = True
+            return
         try:
             session.ingest(parsed)
         except SessionError as exc:
@@ -275,6 +298,7 @@ async def _cleanup(
     channel: ClientChannel,
     terminal: SessionError | None,
     close_code: int,
+    client_ended: bool,
 ) -> None:
     for task in tasks:
         task.cancel()
@@ -294,18 +318,25 @@ async def _cleanup(
             close_cancelled = True
         except Exception:
             logger.exception("Adapter close failed")
+    if session is not None:
+        session.frames.clear()
+        session.audio.clear()
     try:
         if terminal is not None:
             await channel.send_terminal_error(terminal.message)
     except Exception:
         logger.exception("Failed to deliver terminal error")
-    finally:
-        try:
-            await channel.close_socket(close_code)
-        except Exception:
-            logger.exception("WebSocket close failed")
-        if session is not None:
-            session.frames.clear()
-            session.audio.clear()
+    try:
+        if client_ended:
+            await channel.send_ended()
+    except Exception:
+        logger.exception("Failed to deliver session.ended")
+    try:
+        await channel.close_socket(close_code)
+    except Exception:
+        logger.exception("WebSocket close failed")
+    else:
+        session_id = session.session_id if session is not None else channel.session_id
+        logger.info("WebSocket closed session_id=%s", session_id)
     if close_cancelled:
         raise asyncio.CancelledError

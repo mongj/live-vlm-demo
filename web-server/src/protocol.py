@@ -16,6 +16,11 @@ class SessionStartMessage(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class SessionEndMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["session.end"]
+
+
 class InputAppendMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["input.append"]
@@ -41,6 +46,12 @@ class SessionStartedMessage(BaseModel):
     config: dict[str, Any]
 
 
+class SessionEndedMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["session.ended"] = "session.ended"
+    session_id: str | None
+
+
 class ResponseChunkMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["response.chunk"] = "response.chunk"
@@ -62,16 +73,18 @@ class ErrorMessage(BaseModel):
 
 
 InboundMessage = Annotated[
-    Union[SessionStartMessage, InputAppendMessage],
+    Union[SessionStartMessage, SessionEndMessage, InputAppendMessage],
     Field(discriminator="type"),
 ]
 
-_INBOUND_ADAPTER: TypeAdapter[SessionStartMessage | InputAppendMessage] = TypeAdapter(
-    InboundMessage
-)
+_INBOUND_ADAPTER: TypeAdapter[
+    SessionStartMessage | SessionEndMessage | InputAppendMessage
+] = TypeAdapter(InboundMessage)
 
 
-def parse_inbound(raw: str) -> SessionStartMessage | InputAppendMessage:
+def parse_inbound(
+    raw: str,
+) -> SessionStartMessage | SessionEndMessage | InputAppendMessage:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
