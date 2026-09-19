@@ -180,12 +180,12 @@ async def test_open_reset_and_visual_turn_contract() -> None:
     assert body["model"] == JOYAI_MODEL_NAME
     assert body["frame_time_ranges"] == ["1.5 seconds", "2.0 seconds"]
     content = body["messages"][0]["content"]
-    assert content[0] == {"type": "text", "text": "latest question"}
+    assert content[0] == {"type": "text", "text": "What is on the desk?\nlatest question"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     expected = build_joyai_chat_body(
         [VideoFrame(MIN_JPEG, 1.5), VideoFrame(MIN_JPEG, 2.0)],
-        "latest question",
+        "What is on the desk?\nlatest question",
     )
     assert body == expected
     reply = await anext(adapter.read_replies())
@@ -197,6 +197,109 @@ async def test_open_reset_and_visual_turn_contract() -> None:
     closing_reset = transport.requests[-1]
     assert closing_reset.url.path.endswith("/streaming/reset")
     assert json.loads(closing_reset.content) == {}
+
+
+def _text_parts(body: dict[str, Any]) -> list[str]:
+    content = body["messages"][0]["content"]
+    return [item["text"] for item in content if item.get("type") == "text"]
+
+
+async def test_prompt_is_sent_only_on_the_next_visual_turn() -> None:
+    transport = ScriptedTransport(
+        lambda request: _reset_ok(request)
+        if request.url.path.endswith("/streaming/reset")
+        else httpx.Response(200, json=_completion("</response> A laptop.", "raw"))
+    )
+    adapter = JoyAIAdapter(SPEC, {}, http_transport=transport)
+    await adapter.open()
+    adapter.offer_text("hi")
+    assert await adapter.send_feed(_frames(1.0), _disabled_audio()) is True
+    first = json.loads(transport.requests[1].content)
+    assert _text_parts(first) == ["hi"]
+
+    assert await adapter.send_feed(_frames(2.0), _disabled_audio()) is True
+    second = json.loads(transport.requests[2].content)
+    assert _text_parts(second) == []
+    assert all(item["type"] == "image_url" for item in second["messages"][0]["content"])
+
+    adapter.offer_text("what is on the desk?")
+    assert await adapter.send_feed(_frames(3.0), _disabled_audio()) is True
+    third = json.loads(transport.requests[3].content)
+    assert _text_parts(third) == ["hi\nwhat is on the desk?"]
+
+    assert await adapter.send_feed(_frames(4.0), _disabled_audio()) is True
+    fourth = json.loads(transport.requests[4].content)
+    assert _text_parts(fourth) == []
+    await adapter.close()
+
+
+async def test_in_flight_prompt_snapshot_keeps_later_offer() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/streaming/reset"):
+            return _reset_ok(request)
+        started.set()
+        await release.wait()
+        return httpx.Response(200, json=_completion("</response> Hello.", "raw"))
+
+    transport = ScriptedTransport(handler)
+    adapter = JoyAIAdapter(SPEC, {}, http_transport=transport)
+    await adapter.open()
+    adapter.offer_text("first")
+    task = asyncio.create_task(adapter.send_feed(_frames(1.0), _disabled_audio()))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    adapter.offer_text("second")
+    release.set()
+    assert await task is True
+    first = json.loads(
+        next(
+            request.content
+            for request in transport.requests
+            if request.url.path.endswith("/chat/completions")
+        )
+    )
+    assert _text_parts(first) == ["first"]
+
+    assert await adapter.send_feed(_frames(2.0), _disabled_audio()) is True
+    completions = [
+        json.loads(request.content)
+        for request in transport.requests
+        if request.url.path.endswith("/chat/completions")
+    ]
+    assert _text_parts(completions[1]) == ["first\nsecond"]
+    await adapter.close()
+
+
+async def test_chat_follow_up_keeps_standing_instruction() -> None:
+    transport = ScriptedTransport(
+        lambda request: _reset_ok(request)
+        if request.url.path.endswith("/streaming/reset")
+        else httpx.Response(200, json=_completion("</silence>", "</silence>"))
+    )
+    adapter = JoyAIAdapter(SPEC, {}, http_transport=transport)
+    await adapter.open()
+    adapter.offer_text("from now on, everytime i raise my hand, tell me how many fingers im holding up")
+    assert await adapter.send_feed(_frames(1.0), _disabled_audio()) is True
+    adapter.offer_text("can you see me")
+    assert await adapter.send_feed(_frames(2.0), _disabled_audio()) is True
+    adapter.offer_text("hello?")
+    assert await adapter.send_feed(_frames(3.0), _disabled_audio()) is True
+    completions = [
+        json.loads(request.content)
+        for request in transport.requests
+        if request.url.path.endswith("/chat/completions")
+    ]
+    instruction = "from now on, everytime i raise my hand, tell me how many fingers im holding up"
+    assert _text_parts(completions[0]) == [instruction]
+    assert _text_parts(completions[1]) == [f"{instruction}\ncan you see me"]
+    assert _text_parts(completions[2]) == [f"{instruction}\ncan you see me\nhello?"]
+
+    assert await adapter.send_feed(_frames(4.0), _disabled_audio()) is True
+    later = json.loads(transport.requests[-1].content)
+    assert _text_parts(later) == []
+    await adapter.close()
 
 
 async def test_recoverable_http_failure_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

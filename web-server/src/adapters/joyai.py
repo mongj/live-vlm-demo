@@ -99,6 +99,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         self.audio_seconds_per_request = 0.0
         self.audio_retention_seconds = 0.0
         self.session_id = ""
+        self._standing = ""
         self._query = ""
         self._http: httpx.AsyncClient | None = None
         self._http_transport = http_transport
@@ -136,15 +137,26 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
 
     def offer_text(self, text: str) -> None:
         stripped = text.strip()
-        if stripped:
-            self._query = stripped
+        if not stripped:
+            return
+        # webinfer replaces current_query_text on every nonempty prompt.
+        # Chat follow-ups must append so a standing task is not wiped by
+        # "hello?". The original UI has one prompt box, not a transcript.
+        if self._standing:
+            self._standing = f"{self._standing}\n{stripped}"
+        else:
+            self._standing = stripped
+        self._query = self._standing
 
     async def send_feed(self, frames: FrameBuffer, audio: AudioBuffer) -> bool:
         del audio
         batch = frames.consume()
         if not batch:
             return False
+        # Send pending text once. Image-only turns keep webinfer's cached
+        # query; resending the same prompt re-injects it every frame.
         query = self._query
+        self._query = ""
         client = self._http
         if client is None:
             raise SessionError("JoyAI HTTP client is not open", fatal=True)
@@ -172,6 +184,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
             yield await self._replies.get()
 
     async def close(self) -> None:
+        self._standing = ""
         self._query = ""
         client = self._http
         session_id = self.session_id
