@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any, ClassVar, Literal
 
 import httpx
@@ -46,7 +48,19 @@ def presentable_joyai_text(content: str) -> str:
     return text.replace("</delegation>", "").replace("<delegation>", "")
 
 
-def build_joyai_chat_body(frames: list[VideoFrame], query: str) -> dict[str, Any]:
+def session_seconds_from_unix_ms(t_unix_ms: float, origin_unix_ms: float) -> float:
+    # Playground protocol `t` is absolute Unix time in milliseconds.
+    # JoyAI/webinfer `frame_time_ranges` expects session-relative seconds
+    # from adapter open (same string format as the original JoyAI web UI).
+    return max(0.0, (t_unix_ms - origin_unix_ms) / 1000.0)
+
+
+def build_joyai_chat_body(
+    frames: list[VideoFrame],
+    query: str,
+    *,
+    origin_unix_ms: float,
+) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
     if query:
         content.append({"type": "text", "text": query})
@@ -60,7 +74,10 @@ def build_joyai_chat_body(frames: list[VideoFrame], query: str) -> dict[str, Any
     return {
         "model": JOYAI_MODEL_NAME,
         "messages": [{"role": "user", "content": content}],
-        "frame_time_ranges": [f"{frame.t:.1f} seconds" for frame in frames],
+        "frame_time_ranges": [
+            f"{session_seconds_from_unix_ms(frame.t, origin_unix_ms):.1f} seconds"
+            for frame in frames
+        ],
     }
 
 
@@ -104,6 +121,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         self._http: httpx.AsyncClient | None = None
         self._http_transport = http_transport
         self._replies: asyncio.Queue[Reply] = asyncio.Queue(maxsize=REPLY_QUEUE_SIZE)
+        self._origin_unix_ms = 0.0
 
     def _session_headers(self) -> dict[str, str]:
         return {
@@ -133,6 +151,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise SessionError(f"JoyAI open failed: {exc}", fatal=True) from exc
+        self._origin_unix_ms = time.time() * 1000.0
         return self.session_id
 
     def offer_text(self, text: str) -> None:
@@ -160,7 +179,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         client = self._http
         if client is None:
             raise SessionError("JoyAI HTTP client is not open", fatal=True)
-        body = build_joyai_chat_body(batch, query)
+        body = build_joyai_chat_body(batch, query, origin_unix_ms=self._origin_unix_ms)
         try:
             response = await asyncio.wait_for(
                 client.post(
@@ -171,7 +190,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
                 timeout=JOYAI_TURN_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            reply = parse_joyai_reply(response.json())
+            reply = replace(parse_joyai_reply(response.json()), t=batch[-1].t)
         except SessionError:
             raise
         except (httpx.HTTPError, TimeoutError, ValueError) as exc:
@@ -186,6 +205,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
     async def close(self) -> None:
         self._standing = ""
         self._query = ""
+        self._origin_unix_ms = 0.0
         client = self._http
         session_id = self.session_id
         if client is None:

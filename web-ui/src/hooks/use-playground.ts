@@ -28,6 +28,8 @@ export type DebugRawEntry = {
   id: string;
   raw: string;
   streaming: boolean;
+  /** Logged send timestamp for this turn, Unix milliseconds. */
+  t: number;
 };
 
 export type PlaygroundState = {
@@ -131,7 +133,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const videoStreamRef = useRef<MediaStream | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
   const frameTimerRef = useRef<number | null>(null);
-  const startedAtRef = useRef<number | null>(null);
+  const lastSentTRef = useRef<number | null>(null);
   const generationRef = useRef(0);
   const cameraRequestIdRef = useRef(0);
   const micRequestIdRef = useRef(0);
@@ -262,7 +264,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
   function resetTransientState() {
     liveRef.current = false;
-    startedAtRef.current = null;
+    lastSentTRef.current = null;
     streamingAssistantIdRef.current = null;
     streamingDebugIdRef.current = null;
     setIsStreaming(false);
@@ -276,14 +278,6 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     stopFrameTimer();
     closeSocket();
     resetTransientState();
-  }
-
-  function elapsedSeconds(): number {
-    const startedAt = startedAtRef.current;
-    if (startedAt === null) {
-      return 0;
-    }
-    return Math.max(0, (performance.now() - startedAt) / 1000);
   }
 
   function captureFrame(): string | null {
@@ -311,12 +305,15 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (!socket || socket.readyState !== WebSocket.OPEN || !liveRef.current) {
       return false;
     }
+    // Playground protocol `t` is absolute Unix time in milliseconds.
+    const t = Date.now();
+    lastSentTRef.current = t;
     socket.send(
       encodeClientMessage({
         type: "input.append",
         frame,
         ...(text !== undefined ? { text } : {}),
-        t: elapsedSeconds(),
+        t,
       })
     );
     return true;
@@ -375,7 +372,6 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     switch (message.type) {
       case "session.started":
         liveRef.current = true;
-        startedAtRef.current = performance.now();
         setSessionId(message.session_id);
         setPhase("live");
         setFatalError(null);
@@ -453,6 +449,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
                 id,
                 raw: rawChunk,
                 streaming: !message.final,
+                t: message.t ?? lastSentTRef.current ?? Date.now(),
               },
             ]);
           }

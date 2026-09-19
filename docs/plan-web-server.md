@@ -205,7 +205,7 @@ Socket close ends the Session. The v1 message set is exactly the five types abov
   "frame": "<jpeg base64 or null>",
   "audio": "<pcm base64 or null>",
   "text": "What is on the desk?",
-  "t": 1.5
+  "t": 1726700000123
 }
 ```
 
@@ -216,7 +216,8 @@ Socket close ends the Session. The v1 message set is exactly the five types abov
   "text": "A laptop is open.",
   "audio": null,
   "raw": "</response> A laptop is open.",
-  "final": true
+  "final": true,
+  "t": 1726700000123
 }
 ```
 
@@ -245,8 +246,8 @@ Quiet-drop unsupported media before the size and byte checks. Pydantic still val
 
 Frames arrive in capture order from a trusted Client. For the whole Session, the Client either supplies `t` on every Frame or omits it on every Frame:
 
-- Supplied `t` is elapsed seconds from the Client's Session start, not Unix time. Trust the values and ordering; do not sort by timestamp.
-- If omitted, ingest uses `time.monotonic() - session.started_at`. Establish this server-local origin immediately before sending `session.started`.
+- Supplied `t` is absolute Unix time in milliseconds (`Date.now()`), not session-relative seconds. Trust the values and ordering; do not sort by timestamp.
+- If omitted, ingest uses `time.time() * 1000` so VideoFrame `t` stays in Unix milliseconds.
 - The Client uses one timestamp mode throughout a Session. The server does not track or enforce that choice; arrival order controls buffering.
 - `t` annotates the Frame only. Audio is ordered by sample arrival; Text does not use it.
 
@@ -254,7 +255,7 @@ Use Pydantic models with `ConfigDict(extra="forbid")`, literal `type` strings, a
 
 ### 4.3 Reply meaning
 
-A `Reply(text="", audio=None, raw="", final=False)` holds raw PCM bytes internally, never playground base64. It has no Session ID. ClientChannel supplies the ID and encodes Audio when writing `response.chunk`.
+A `Reply(text="", audio=None, raw="", final=False, t=None)` holds raw PCM bytes internally, never playground base64. It has no Session ID. `t` is the last consumed `input.append` Unix-ms timestamp when the turn had Frames. ClientChannel supplies the ID, encodes Audio, and echoes `t` on `response.chunk` when present.
 
 Text and Audio are independent; either can be empty. Clients append presentable Text and queue Audio as chunks arrive. `final` ends a generated output turn, not Client playback. Raw preserves the adapter's unnormalized model text; it may legitimately be empty. Clients must not parse JoyAI markers to render the default UI.
 
@@ -263,7 +264,7 @@ Text and Audio are independent; either can be empty. Clients append presentable 
 ### 5.1 Owners
 
 - **Session coordinator:** the WebSocket route coroutine. Retains the adapter, owns startup/shutdown and task handles.
-- **Session:** the bound ID/model, adapter reference, Frame/Audio Buffers, `asyncio.Event`, and timestamp origin.
+- **Session:** the bound ID/model, adapter reference, Frame/Audio Buffers, and `asyncio.Event`.
 - **ClientChannel:** the only outbound writer. Uses one async lock for JSON writes, adds Session IDs, and encodes Reply Audio. It does not decide when the Session ends.
 - **Adapter:** model-specific Config, query state, transport resources, and Reply delivery. Constructors allocate no external resources.
 
@@ -278,7 +279,7 @@ Implement the route with one outer `try/finally` covering these steps:
 3. Resolve the Catalog row and validate its Config. An unknown Model or invalid Config on the first Start is fatal.
 4. Construct the adapter and immediately assign it to the coordinator's retained variable, **before awaiting anything**. Constructors initialize every field, including optional HTTP handles, IDs, query strings, and queues.
 5. Await `adapter.open()` under a fixed 10-second total startup timeout. It returns the public Session ID.
-6. Construct Session buffers from adapter media limits, set the timestamp origin, and let ClientChannel adopt the ID. Send `session.started` with the validated Config.
+6. Construct Session buffers from adapter media limits and let ClientChannel adopt the ID. Send `session.started` with the validated Config.
 7. Only after that write succeeds, start receiver, feeder, and forwarder tasks.
 
 ClientChannel bounds each ordinary write, including lock acquisition and `session.started`, to five seconds. A failed acknowledgement is a startup failure. The retained adapter is cleanup-owned from step 4 onward.
@@ -453,7 +454,7 @@ POST to the resolved `/v1/chat/completions` with:
 - `x-system-prompt-key: <validated Config key>`;
 - `model: "JoyAI-VL-Interaction"`, defined as an adapter constant;
 - one user message containing the snapshotted Text, if nonempty, and each JPEG as an OpenAI-style `image_url` data URL;
-- one matching `frame_time_ranges` entry per Frame, formatted as `"<t to one decimal> seconds"`.
+- one matching `frame_time_ranges` entry per Frame, formatted as `"<session-relative seconds to one decimal> seconds"`. Convert playground Unix-ms `t` to seconds from adapter open at this boundary (`(t - origin_unix_ms) / 1000`).
 
 The request contains only the fields listed above. JoyAI performs the upstream JPEG data-URL encoding.
 

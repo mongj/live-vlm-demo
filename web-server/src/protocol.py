@@ -22,6 +22,7 @@ class InputAppendMessage(BaseModel):
     frame: str | None = None
     audio: str | None = None
     text: str | None = None
+    # Absolute Unix time in milliseconds when supplied (`Date.now()`).
     t: float | None = None
 
     @field_validator("t")
@@ -48,6 +49,8 @@ class ResponseChunkMessage(BaseModel):
     audio: str | None
     raw: str
     final: bool
+    # Echo of the last consumed input.append `t` (Unix ms). Omitted when unknown.
+    t: float | None = None
 
 
 class ErrorMessage(BaseModel):

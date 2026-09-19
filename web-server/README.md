@@ -77,9 +77,8 @@ async def main() -> None:
             "type": "input.append",
             "frame": base64.b64encode(JPEG).decode("ascii"),
             "text": "What is on the desk?",
-            "t": 1.5,
+            "t": 1726700000123,
         }))
-        print(await ws.recv())
         print(await ws.recv())
 
 asyncio.run(main())
@@ -134,7 +133,7 @@ Then Start a JoyAI Session:
   "type": "input.append",
   "frame": "<jpeg base64>",
   "text": "What is on the desk?",
-  "t": 1.5
+  "t": 1726700000123
 }
 ```
 

@@ -53,8 +53,12 @@ class ClientChannel:
             audio=audio,
             raw=reply.raw,
             final=reply.final,
+            t=reply.t,
         )
-        await self._send(message.model_dump(), ORDINARY_WRITE_TIMEOUT_SECONDS)
+        payload = message.model_dump()
+        if reply.t is None:
+            payload.pop("t", None)
+        await self._send(payload, ORDINARY_WRITE_TIMEOUT_SECONDS)
 
     async def send_error(self, message: str, *, fatal: bool) -> None:
         payload = ErrorMessage(

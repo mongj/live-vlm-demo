@@ -46,14 +46,13 @@ class Session:
     frames: FrameBuffer
     audio: AudioBuffer
     feed_ready: asyncio.Event
-    started_at: float
 
     def ingest(self, feed: InputAppendMessage) -> None:
         if feed.frame is not None and self.adapter.max_frames_per_request > 0:
             jpeg = decode_jpeg_b64(feed.frame)
-            timestamp = (
-                feed.t if feed.t is not None else time.monotonic() - self.started_at
-            )
+            # Playground `t` is Unix milliseconds. Stamp omitted frames with
+            # the same unit so adapters always see an absolute wall-clock `t`.
+            timestamp = feed.t if feed.t is not None else time.time() * 1000
             self.frames.push(VideoFrame(jpeg=jpeg, t=timestamp))
             self.feed_ready.set()
         if feed.audio is not None and self.adapter.audio_seconds_per_request > 0:
@@ -104,7 +103,6 @@ async def run_session(websocket: ClientSocket, catalog: SessionCatalog) -> None:
                     adapter.audio_retention_seconds,
                 ),
                 feed_ready=asyncio.Event(),
-                started_at=time.monotonic(),
             )
             channel.adopt_session_id(session_id)
             await channel.send_started(spec.id, config.model_dump())

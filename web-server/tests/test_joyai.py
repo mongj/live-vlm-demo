@@ -16,6 +16,7 @@ from live_vlm_server.adapters.joyai import (
     build_joyai_chat_body,
     parse_joyai_reply,
     presentable_joyai_text,
+    session_seconds_from_unix_ms,
 )
 from live_vlm_server.buffers import AudioBuffer, FrameBuffer
 from live_vlm_server.catalog import Catalog
@@ -24,6 +25,7 @@ from live_vlm_server.session import run_session
 from live_vlm_server.types import ModelSpec, Reply, SessionError, VideoFrame
 
 MIN_JPEG = b"\xff\xd8\xff\xd9"
+ORIGIN_UNIX_MS = 1_700_000_000_000.0
 SPEC = ModelSpec(
     id="joyai-vl",
     adapter="joyai",
@@ -112,6 +114,11 @@ async def _wait_json(websocket: _FakeWebSocket, count: int, timeout: float = 2.0
     raise AssertionError(f"wanted {count} messages, got {websocket.sent!r}")
 
 
+def test_unix_ms_converts_to_session_relative_seconds() -> None:
+    assert session_seconds_from_unix_ms(ORIGIN_UNIX_MS + 1500, ORIGIN_UNIX_MS) == 1.5
+    assert session_seconds_from_unix_ms(ORIGIN_UNIX_MS - 100, ORIGIN_UNIX_MS) == 0.0
+
+
 def test_config_defaults_and_schema() -> None:
     config = JoyAIConfig.model_validate({})
     assert config.system_prompt_key == "DEFAULT_SYSTEM_PROMPT_NO_DELEGATION"
@@ -169,7 +176,8 @@ async def test_open_reset_and_visual_turn_contract() -> None:
     adapter.offer_text("What is on the desk?")
     adapter.offer_text("   ")
     adapter.offer_text("latest question")
-    frames = _frames(1.5, 2.0)
+    adapter._origin_unix_ms = ORIGIN_UNIX_MS
+    frames = _frames(ORIGIN_UNIX_MS + 1_500, ORIGIN_UNIX_MS + 2_000)
     assert await adapter.send_feed(frames, _disabled_audio()) is True
     turn = transport.requests[1]
     assert str(turn.url) == "http://127.0.0.1:8070/v1/chat/completions"
@@ -184,8 +192,12 @@ async def test_open_reset_and_visual_turn_contract() -> None:
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     expected = build_joyai_chat_body(
-        [VideoFrame(MIN_JPEG, 1.5), VideoFrame(MIN_JPEG, 2.0)],
+        [
+            VideoFrame(MIN_JPEG, ORIGIN_UNIX_MS + 1_500),
+            VideoFrame(MIN_JPEG, ORIGIN_UNIX_MS + 2_000),
+        ],
         "What is on the desk?\nlatest question",
+        origin_unix_ms=ORIGIN_UNIX_MS,
     )
     assert body == expected
     reply = await anext(adapter.read_replies())
@@ -193,6 +205,7 @@ async def test_open_reset_and_visual_turn_contract() -> None:
     assert reply.raw == "  </response> A laptop.  "
     assert reply.audio is None
     assert reply.final is True
+    assert reply.t == ORIGIN_UNIX_MS + 2_000
     await adapter.close()
     closing_reset = transport.requests[-1]
     assert closing_reset.url.path.endswith("/streaming/reset")
@@ -362,6 +375,11 @@ async def test_session_quiet_drops_audio_and_forwards_normalized_reply() -> None
         def __init__(self, spec: ModelSpec, raw_config: dict[str, Any]) -> None:
             super().__init__(spec, raw_config, http_transport=transport)
 
+        async def open(self) -> str:
+            session_id = await super().open()
+            self._origin_unix_ms = ORIGIN_UNIX_MS
+            return session_id
+
     catalog = Catalog(specs=(SPEC,), registry={"joyai": FakeJoyAI})
     websocket = _FakeWebSocket()
     task = asyncio.create_task(run_session(websocket, catalog))
@@ -377,7 +395,7 @@ async def test_session_quiet_drops_audio_and_forwards_normalized_reply() -> None
             "frame": encode_media_b64(MIN_JPEG),
             "audio": "this is not valid base64!!!",
             "text": "What is on the desk?",
-            "t": 1.5,
+            "t": ORIGIN_UNIX_MS + 1_500,
         }
     )
     messages = await _wait_json(websocket, 2)
@@ -389,6 +407,7 @@ async def test_session_quiet_drops_audio_and_forwards_normalized_reply() -> None
     assert chunk["audio"] is None
     assert chunk["final"] is True
     assert chunk["session_id"] == started[0]["session_id"]
+    assert chunk["t"] == ORIGIN_UNIX_MS + 1_500
     turn = next(
         request
         for request in transport.requests

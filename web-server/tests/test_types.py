@@ -38,6 +38,7 @@ def test_reply_defaults_and_session_error_flags() -> None:
     assert reply.audio is None
     assert reply.raw == ""
     assert reply.final is False
+    assert reply.t is None
     recoverable = SessionError("nope", fatal=False)
     fatal = SessionError("boom")
     assert recoverable.fatal is False

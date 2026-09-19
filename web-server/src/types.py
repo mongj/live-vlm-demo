@@ -24,6 +24,7 @@ class Reply:
     audio: bytes | None = None
     raw: str = ""
     final: bool = False
+    t: float | None = None
 
 
 class SessionError(Exception):

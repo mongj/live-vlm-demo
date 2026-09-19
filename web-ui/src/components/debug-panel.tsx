@@ -11,6 +11,18 @@ type DebugPanelProps = {
   onBack?: () => void;
 };
 
+const DEBUG_TIME_FORMAT: Intl.DateTimeFormatOptions = {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  fractionalSecondDigits: 3,
+  hour12: false,
+};
+
+function formatDebugTimestamp(unixMs: number): string {
+  return new Date(unixMs).toLocaleTimeString(undefined, DEBUG_TIME_FORMAT);
+}
+
 export function DebugPanel({ entries, onBack }: DebugPanelProps) {
   return (
     <aside className="flex h-full min-h-0 min-w-0 flex-col bg-background">
@@ -28,12 +40,12 @@ export function DebugPanel({ entries, onBack }: DebugPanelProps) {
         ) : (
           <div className="flex flex-col gap-3 p-4">
             {entries.map((entry) => (
-              <pre
-                className="wrap-break-word whitespace-pre-wrap font-mono text-xs text-muted-foreground"
-                key={entry.id}
-              >
-                {entry.raw}
-              </pre>
+              <div className="flex flex-col gap-1" key={entry.id}>
+                <p className="text-xs text-muted-foreground">{formatDebugTimestamp(entry.t)}</p>
+                <pre className="wrap-break-word whitespace-pre-wrap font-mono text-xs text-muted-foreground">
+                  {entry.raw}
+                </pre>
+              </div>
             ))}
           </div>
         )}

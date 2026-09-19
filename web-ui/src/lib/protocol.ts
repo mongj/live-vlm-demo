@@ -9,6 +9,7 @@ export type InputAppendMessage = {
   frame?: string | null;
   audio?: string | null;
   text?: string | null;
+  /** Absolute Unix time in milliseconds (`Date.now()`). */
   t?: number | null;
 };
 
@@ -28,6 +29,8 @@ export type ResponseChunkMessage = {
   audio?: string | null;
   raw?: string;
   final: boolean;
+  /** Echo of the last consumed `input.append` `t` (Unix ms), when known. */
+  t?: number;
 };
 
 export type ErrorMessage = {
@@ -49,6 +52,13 @@ function asString(value: unknown): string | null {
 
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function asUnixMs(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return value;
 }
 
 export function parseServerMessage(value: unknown): ServerMessage | null {
@@ -84,6 +94,7 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
         audio: asString(value.audio),
         raw: asString(value.raw) ?? undefined,
         final,
+        t: asUnixMs(value.t),
       };
     }
     case "error": {

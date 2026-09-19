@@ -45,8 +45,8 @@ The Client's ongoing Frame, Audio, and Text on a Session, with individual modali
 _Avoid_: input, stream, media (as the bundle)
 
 **Client time**:
-Elapsed time from the Client's Session start, attached to capture-ordered Frames and trusted without correction. A Session consistently uses supplied Client times or server-observed elapsed arrival times when omitted; neither implies Audio/video synchronization.
-_Avoid_: server clock, wall clock, frame_time_range (as the playground concept)
+Absolute Unix time in milliseconds (`Date.now()`), attached to capture-ordered Frames and trusted without correction. A Session consistently uses supplied Client times or server-observed Unix-ms arrival times when omitted; neither implies Audio/video synchronization.
+_Avoid_: server clock, session-relative seconds (as the playground `t`), frame_time_range (as the playground concept)
 
 **Frame**:
 A still image sampled from the camera at a point in time, encoded as JPEG. Not a video file or container. Frames that cannot be delivered immediately do not become a backlog of turns.

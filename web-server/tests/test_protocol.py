@@ -28,13 +28,13 @@ def test_parse_start_defaults_config_to_empty_object() -> None:
 
 def test_parse_feed_optional_fields_and_timestamp() -> None:
     parsed = parse_inbound(
-        '{"type": "input.append", "frame": "a", "audio": null, "text": "hi", "t": 1.5}'
+        '{"type": "input.append", "frame": "a", "audio": null, "text": "hi", "t": 1726700000123}'
     )
     assert isinstance(parsed, InputAppendMessage)
     assert parsed.frame == "a"
     assert parsed.audio is None
     assert parsed.text == "hi"
-    assert parsed.t == 1.5
+    assert parsed.t == 1726700000123
     omitted = parse_inbound('{"type": "input.append"}')
     assert isinstance(omitted, InputAppendMessage)
     assert omitted.frame is None
@@ -64,6 +64,12 @@ def test_zero_timestamp_is_accepted() -> None:
     parsed = parse_inbound('{"type": "input.append", "t": 0}')
     assert isinstance(parsed, InputAppendMessage)
     assert parsed.t == 0
+
+
+def test_unix_ms_timestamp_is_accepted() -> None:
+    parsed = parse_inbound('{"type": "input.append", "t": 1726700000123}')
+    assert isinstance(parsed, InputAppendMessage)
+    assert parsed.t == 1726700000123
 
 
 def test_base64_size_and_strictness() -> None:
