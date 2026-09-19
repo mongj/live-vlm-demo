@@ -11,7 +11,11 @@ import {
 import { DEFAULT_GATEWAY_ADDRESS, getRealtimeUrl, parseGatewayAddress } from "@/lib/gateway";
 import { defaultsFromSchema } from "@/lib/json-schema";
 import { encodePcmBase64, PcmCapture, PcmPlayer } from "@/lib/pcm";
-import { encodeClientMessage, parseServerMessage } from "@/lib/protocol";
+import {
+  encodeClientMessage,
+  inputTranscriptionFromRaw,
+  parseServerMessage,
+} from "@/lib/protocol";
 import { useEffect, useRef, useState, type RefObject } from "react";
 
 export type CameraViewState = "empty" | "permission" | "connecting" | "live" | "error";
@@ -153,7 +157,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const cameraInFlightRef = useRef(false);
   const micInFlightRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
+  const streamingUserIdRef = useRef<string | null>(null);
   const streamingDebugIdRef = useRef<string | null>(null);
+  const assistantTurnOpenRef = useRef(false);
+  const discardReplyAudioRef = useRef(false);
+  const suppressInputBargeInRef = useRef(false);
   const stoppingRef = useRef(false);
   const endingRef = useRef<SessionEndWaiter | null>(null);
 
@@ -287,8 +295,27 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     );
   }
 
+  function replyPlaybackActive(): boolean {
+    return assistantTurnOpenRef.current || Boolean(pcmPlayerRef.current?.isActive());
+  }
+
+  function interruptPlayback() {
+    const hadOpenTurn = assistantTurnOpenRef.current;
+    pcmPlayerRef.current?.stop();
+    if (hadOpenTurn) {
+      discardReplyAudioRef.current = true;
+    }
+    suppressInputBargeInRef.current = true;
+  }
+
+  function maybeBargeInFromMic() {
+    if (replyPlaybackActive()) {
+      interruptPlayback();
+    }
+  }
+
   async function attachPcmCapture(stream: MediaStream) {
-    const capture = new PcmCapture(stream, sendAudio);
+    const capture = new PcmCapture(stream, sendAudio, maybeBargeInFromMic);
     pcmCaptureRef.current = capture;
     try {
       await capture.start();
@@ -318,6 +345,9 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function playReplyAudio(audio: string) {
+    if (discardReplyAudioRef.current) {
+      return;
+    }
     const player = ensurePcmPlayer();
     player.enqueue(audio);
     void player.resume();
@@ -349,7 +379,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     liveRef.current = false;
     lastSentTRef.current = null;
     streamingAssistantIdRef.current = null;
+    streamingUserIdRef.current = null;
     streamingDebugIdRef.current = null;
+    assistantTurnOpenRef.current = false;
+    discardReplyAudioRef.current = false;
+    suppressInputBargeInRef.current = false;
     setIsStreaming(false);
     setSessionId(null);
     setPhase("idle");
@@ -475,13 +509,75 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         void ensurePcmPlayer().resume();
         break;
       case "response.chunk": {
-        if (message.audio) {
-          playReplyAudio(message.audio);
-        }
         const chunk = message.text ?? "";
         const presentable = hasPresentableText(chunk);
         const rawChunk = message.raw ?? "";
         const presentableRaw = hasRawOutput(rawChunk);
+        const inputChunk = inputTranscriptionFromRaw(rawChunk);
+        const presentableInput = hasPresentableText(inputChunk);
+
+        if (message.interrupted) {
+          interruptPlayback();
+        } else if (
+          presentableInput &&
+          replyPlaybackActive() &&
+          !suppressInputBargeInRef.current
+        ) {
+          interruptPlayback();
+        }
+        if (presentableInput) {
+          suppressInputBargeInRef.current = true;
+        }
+        if (message.audio) {
+          playReplyAudio(message.audio);
+        }
+        if ((message.audio || presentable) && !message.final) {
+          assistantTurnOpenRef.current = true;
+        }
+        if (presentable && !discardReplyAudioRef.current) {
+          suppressInputBargeInRef.current = false;
+        }
+
+        if (presentableInput) {
+          const streamingId = streamingUserIdRef.current;
+          const userStreaming = !message.final && !presentable;
+          if (streamingId) {
+            setMessages((current) =>
+              current.map((entry) =>
+                entry.id === streamingId
+                  ? {
+                      ...entry,
+                      text: inputChunk,
+                      streaming: userStreaming,
+                    }
+                  : entry
+              )
+            );
+          } else {
+            const id = crypto.randomUUID();
+            if (userStreaming) {
+              streamingUserIdRef.current = id;
+            }
+            setMessages((current) => [
+              ...current,
+              {
+                id,
+                role: "user",
+                text: inputChunk,
+                streaming: userStreaming,
+              },
+            ]);
+          }
+        } else if (streamingUserIdRef.current && (message.final || presentable)) {
+          const streamingId = streamingUserIdRef.current;
+          setMessages((current) =>
+            current.map((entry) => (entry.id === streamingId ? { ...entry, streaming: false } : entry))
+          );
+        }
+
+        if (message.final || presentable) {
+          streamingUserIdRef.current = null;
+        }
 
         if (presentable) {
           const streamingId = streamingAssistantIdRef.current;
@@ -561,6 +657,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
         if (message.final) {
           streamingDebugIdRef.current = null;
+          assistantTurnOpenRef.current = false;
+          discardReplyAudioRef.current = false;
         }
 
         setIsStreaming(!message.final);
@@ -879,6 +977,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (!trimmed) {
       return;
     }
+    interruptPlayback();
     await enqueueCapture(async () => {
       if (!liveRef.current) {
         setRecoverableError("Start a Session before sending a message");

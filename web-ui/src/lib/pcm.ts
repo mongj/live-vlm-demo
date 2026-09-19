@@ -2,6 +2,8 @@ export const INBOUND_SAMPLE_RATE_HZ = 16_000;
 export const OUTBOUND_SAMPLE_RATE_HZ = 24_000;
 export const BYTES_PER_SAMPLE = 2;
 export const CAPTURE_CHUNK_SECONDS = 0.1;
+/** RMS on captured float samples that counts as local speech onset. */
+export const BARGE_IN_RMS_THRESHOLD = 0.045;
 
 const BASE64_CHUNK = 0x2000;
 const SCRIPT_PROCESSOR_BUFFER = 4096;
@@ -46,6 +48,18 @@ export function floatToS16le(samples: Float32Array): Uint8Array {
     view.setInt16(i * BYTES_PER_SAMPLE, value, true);
   }
   return out;
+}
+
+export function floatRms(samples: Float32Array): number {
+  if (samples.length === 0) {
+    return 0;
+  }
+  let sum = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    const value = samples[i] ?? 0;
+    sum += value * value;
+  }
+  return Math.sqrt(sum / samples.length);
 }
 
 export function s16leToFloat(pcm: Uint8Array): Float32Array {
@@ -168,6 +182,10 @@ export class PcmPlayer {
     this.leftover = new Uint8Array(0);
   }
 
+  isActive(): boolean {
+    return this.sources.length > 0;
+  }
+
   close(): void {
     this.stop();
     void this.context.close();
@@ -180,12 +198,13 @@ export class PcmCapture {
   private node: AudioNode | null = null;
   private mute: GainNode | null = null;
   private workletUrl: string | null = null;
-  private pending = new Float32Array(0);
+  private pending: Float32Array = new Float32Array(0);
   private closed = false;
 
   constructor(
     private readonly stream: MediaStream,
-    private readonly onChunk: (pcm: Uint8Array) => void
+    private readonly onChunk: (pcm: Uint8Array) => void,
+    private readonly onSpeechStart?: () => void
   ) {}
 
   async start(): Promise<void> {
@@ -272,6 +291,9 @@ export class PcmCapture {
     const context = this.context;
     if (!context) {
       return;
+    }
+    if (this.onSpeechStart && floatRms(samples) >= BARGE_IN_RMS_THRESHOLD) {
+      this.onSpeechStart();
     }
     this.pending = concatFloat(this.pending, samples);
     const needed = Math.max(1, Math.round(context.sampleRate * CAPTURE_CHUNK_SECONDS));

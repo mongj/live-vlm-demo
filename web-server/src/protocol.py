@@ -60,6 +60,9 @@ class ResponseChunkMessage(BaseModel):
     audio: str | None
     raw: str
     final: bool
+    # Gemini Live sets this when the model turn was cut by user activity.
+    # Omitted on the wire when false. A generic `final` is not barge-in.
+    interrupted: bool = False
     # Echo of the last consumed input.append `t` (Unix ms). Omitted when unknown.
     t: float | None = None
 

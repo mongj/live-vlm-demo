@@ -65,6 +65,11 @@ def build_live_config(config: GeminiConfig) -> types.LiveConnectConfig:
         ),
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
+        # Gemini 3.x default: a turn includes speech/text activity plus all
+        # video since the last turn. Video frames do not start a turn.
+        realtime_input_config=types.RealtimeInputConfig(
+            turn_coverage=types.TurnCoverage.TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO
+        ),
     )
 
 
@@ -103,14 +108,20 @@ def replies_from_live_message(message: object, *, last_t: float | None) -> list[
     input_text = ""
     raw_parts: list[str] = []
     final = False
+    interrupted = False
     if content is not None:
         output_text = _transcription_text(getattr(content, "output_transcription", None))
         input_text = _transcription_text(getattr(content, "input_transcription", None))
+        if not input_text:
+            input_text = _transcription_text(
+                getattr(content, "interim_input_transcription", None)
+            )
         if output_text:
             raw_parts.append(output_text)
         if input_text:
             raw_parts.append(f"[input] {input_text}")
-        if getattr(content, "turn_complete", False) or getattr(content, "interrupted", False):
+        interrupted = bool(getattr(content, "interrupted", False))
+        if getattr(content, "turn_complete", False) or interrupted:
             final = True
     audio = _audio_from_message(message)
     raw = "\n".join(raw_parts)
@@ -122,6 +133,7 @@ def replies_from_live_message(message: object, *, last_t: float | None) -> list[
             audio=audio,
             raw=raw,
             final=final,
+            interrupted=interrupted,
             t=last_t,
         )
     ]

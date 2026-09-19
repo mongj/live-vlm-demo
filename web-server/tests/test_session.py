@@ -493,10 +493,15 @@ async def test_channel_serializes_writes_and_times_out(
     assert payloads[1]["type"] == "response.chunk"
     assert payloads[1]["audio"] == encode_media_b64(b"\x00\x00")
     assert payloads[1]["t"] == 1_726_700_000_123
+    assert "interrupted" not in payloads[1]
     assert payloads[2] == {"type": "session.ended", "session_id": "mock-1"}
     await channel.send_reply(Reply(text="three", raw="three", final=True))
     payloads = [json.loads(item) for item in websocket.sent]
     assert "t" not in payloads[3]
+    assert "interrupted" not in payloads[3]
+    await channel.send_reply(Reply(text="", raw="", final=True, interrupted=True))
+    payloads = [json.loads(item) for item in websocket.sent]
+    assert payloads[4]["interrupted"] is True
     websocket.hang_send = True
     monkeypatch.setattr(channel_mod, "ORDINARY_WRITE_TIMEOUT_SECONDS", 0.05)
     with pytest.raises(SessionError, match="timed out"):

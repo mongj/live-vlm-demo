@@ -153,9 +153,9 @@ label = "Gemini 3.8 Live"
 
 Put `GEMINI_API_KEY` in the environment or in `web-server/.env` (not committed). Restart the gateway after changing the catalog or `.env`.
 
-Start Config is `system_instruction` (optional) and `voice` (`Kore` by default). The adapter sends JPEG Frames (at most 1 fps), 16 kHz PCM Audio, and Text over `send_realtime_input`. Replies map Gemini audio chunks to `response.chunk.audio`, output transcriptions to `text`/`raw`, input transcriptions to `raw` as `[input] …`, and `turn_complete`/`interrupted` to `final: true`. Tools, custom VAD, and thinking config are not exposed.
+Start Config is `system_instruction` (optional) and `voice` (`Kore` by default). The adapter sends JPEG Frames (at most 1 fps), 16 kHz PCM Audio, and Text over `send_realtime_input`. Replies map Gemini audio chunks to `response.chunk.audio`, output transcriptions to `text`/`raw`, input transcriptions (final, or interim if that event has no final) to `raw` as `[input] …`, and `turn_complete`/`interrupted` to `final: true`. Interrupted turns also set `interrupted: true` so the playground can stop leftover Reply Audio. The playground Transcript renders those `[input]` lines as user turns. Video is included in the next speech/text turn (`TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO`); frames do not start a turn. Tools, custom VAD, thinking, and `proactive_audio` are not exposed (`proactive_audio` lets Gemini stay silent and is unsupported on Gemini 3.x Live).
 
-The playground sidebar lists this row from `GET /v1/models`. Camera Frames plus Text work with the current UI. Microphone PCM and Reply Audio playback are accepted on the wire if a Client sends or plays them; the default UI does not stream the mic yet.
+The playground sidebar lists this row from `GET /v1/models`. Camera Frames, microphone PCM, typed Text, and Reply Audio playback work with the current UI.
 
 ## Live verification
 

@@ -239,7 +239,7 @@ export function TranscriptPanel({
               className={emptyStateClass(density)}
               description={
                 sessionActive
-                  ? "Send a message"
+                  ? "Speak or send a message"
                   : "Start a session to see the live transcript."
               }
               icon={emptyStateIcon(density)}

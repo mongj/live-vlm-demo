@@ -92,6 +92,9 @@ def test_build_live_config_enables_audio_and_transcripts() -> None:
     assert live.output_audio_transcription is not None
     voice = live.speech_config.voice_config.prebuilt_voice_config.voice_name
     assert voice == "Puck"
+    assert live.realtime_input_config is not None
+    coverage = live.realtime_input_config.turn_coverage
+    assert getattr(coverage, "value", coverage) == "TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO"
     empty = build_live_config(GeminiConfig.model_validate({}))
     assert empty.system_instruction is None
     assert GEMINI_LIVE_MODEL == "gemini-3.8-live"
@@ -145,6 +148,61 @@ def test_replies_map_audio_transcripts_and_turn_complete() -> None:
     )
     assert done == [Reply(text="", audio=None, raw="", final=True, t=3.0)]
     assert replies_from_live_message(SimpleNamespace(data=None, server_content=None), last_t=1.0) == []
+    input_only = replies_from_live_message(
+        SimpleNamespace(
+            data=None,
+            server_content=SimpleNamespace(
+                output_transcription=None,
+                input_transcription=SimpleNamespace(text="What color is this?"),
+                interim_input_transcription=SimpleNamespace(text="What col"),
+                turn_complete=False,
+                interrupted=False,
+            ),
+        ),
+        last_t=5.0,
+    )
+    assert input_only == [
+        Reply(text="", audio=None, raw="[input] What color is this?", final=False, t=5.0)
+    ]
+    interim_only = replies_from_live_message(
+        SimpleNamespace(
+            data=None,
+            server_content=SimpleNamespace(
+                output_transcription=None,
+                input_transcription=None,
+                interim_input_transcription=SimpleNamespace(text="What col"),
+                turn_complete=False,
+                interrupted=False,
+            ),
+        ),
+        last_t=6.0,
+    )
+    assert interim_only == [
+        Reply(text="", audio=None, raw="[input] What col", final=False, t=6.0)
+    ]
+    leftover = b"\x03\x00\x04\x00"
+    interrupted = replies_from_live_message(
+        SimpleNamespace(
+            data=leftover,
+            server_content=SimpleNamespace(
+                output_transcription=None,
+                input_transcription=None,
+                turn_complete=False,
+                interrupted=True,
+            ),
+        ),
+        last_t=9.0,
+    )
+    assert interrupted == [
+        Reply(
+            text="",
+            audio=leftover,
+            raw="",
+            final=True,
+            interrupted=True,
+            t=9.0,
+        )
+    ]
 
 
 async def test_open_requires_api_key_and_uses_injected_session(

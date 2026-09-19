@@ -58,11 +58,14 @@ class ClientChannel:
             audio=audio,
             raw=reply.raw,
             final=reply.final,
+            interrupted=reply.interrupted,
             t=reply.t,
         )
         payload = message.model_dump()
         if reply.t is None:
             payload.pop("t", None)
+        if not reply.interrupted:
+            payload.pop("interrupted", None)
         await self._send(payload, ORDINARY_WRITE_TIMEOUT_SECONDS)
 
     async def send_error(self, message: str, *, fatal: bool) -> None:

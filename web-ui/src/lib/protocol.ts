@@ -38,6 +38,8 @@ export type ResponseChunkMessage = {
   audio?: string | null;
   raw?: string;
   final: boolean;
+  /** Gemini Live barge-in. Absent or false is a normal chunk. */
+  interrupted?: boolean;
   /** Echo of the last consumed `input.append` `t` (Unix ms), when known. */
   t?: number;
 };
@@ -103,7 +105,9 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
       const sessionId = asString(value.session_id);
       const text = asString(value.text);
       const final = asBoolean(value.final);
-      if (!sessionId || text === null || final === null) {
+      const interrupted =
+        value.interrupted === undefined ? false : asBoolean(value.interrupted);
+      if (!sessionId || text === null || final === null || interrupted === null) {
         return null;
       }
       return {
@@ -113,6 +117,7 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
         audio: asString(value.audio),
         raw: asString(value.raw) ?? undefined,
         final,
+        interrupted,
         t: asUnixMs(value.t),
       };
     }
@@ -140,4 +145,15 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
 
 export function encodeClientMessage(message: ClientMessage): string {
   return JSON.stringify(message);
+}
+
+/** Gemini Live input transcripts are forwarded on `response.chunk.raw` as `[input] …`. */
+export const INPUT_TRANSCRIPTION_PREFIX = "[input] ";
+
+export function inputTranscriptionFromRaw(raw: string): string {
+  const index = raw.indexOf(INPUT_TRANSCRIPTION_PREFIX);
+  if (index === -1) {
+    return "";
+  }
+  return raw.slice(index + INPUT_TRANSCRIPTION_PREFIX.length);
 }
