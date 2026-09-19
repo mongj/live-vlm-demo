@@ -27,7 +27,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       suppressHydrationWarning
     >
-      <body className="h-full overflow-hidden antialiased">
+      <body className="h-full overflow-hidden antialiased" suppressHydrationWarning>
         <ThemeProvider attribute="class" defaultTheme="system" disableTransitionOnChange enableSystem>
           <TooltipProvider>{children}</TooltipProvider>
         </ThemeProvider>
