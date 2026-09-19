@@ -78,8 +78,8 @@ export function TranscriptPanel({
             <ConversationEmptyState
               description={
                 sessionActive
-                  ? "Send a message to include the current camera Frame."
-                  : "Start a Session to begin a live transcript."
+                  ? "Send a message"
+                  : "Start a session to see the live transcript."
               }
               icon={<MessageSquareIcon className="size-5" />}
               title="No messages"

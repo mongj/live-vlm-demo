@@ -84,7 +84,7 @@ export function ConnectionStatus(props: ConnectionStatusProps) {
         <span>{status.label}</span>
       </div>
       {detail ? (
-        <p className="pl-3.5 text-xs leading-5 text-muted-foreground break-words">{detail}</p>
+        <p className="pl-3.5 text-xs leading-5 text-muted-foreground wrap-break-word">{detail}</p>
       ) : null}
     </div>
   );
