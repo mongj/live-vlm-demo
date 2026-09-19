@@ -4,8 +4,9 @@ import { ConnectionStatus } from "@/components/connection-status";
 import { SchemaForm } from "@/components/schema-form";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
@@ -15,10 +16,38 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import type { PlaygroundState } from "@/hooks/use-playground";
+import { DEFAULT_GATEWAY_ADDRESS } from "@/lib/gateway";
+import { ChevronDownIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 type ModelSidebarProps = {
   playground: PlaygroundState;
 };
+
+function ConfigSection({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+}) {
+  return (
+    <Collapsible className="group/collapsible flex min-w-0 flex-col" defaultOpen>
+      <CollapsibleTrigger className="flex w-full min-w-0 cursor-pointer items-center justify-between gap-2 bg-transparent px-4 py-4 text-left outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 [&_svg]:size-4">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">{title}</p>
+          <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+        </div>
+        <ChevronDownIcon className="shrink-0 self-center text-muted-foreground transition-transform duration-200 in-data-[state=open]:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="min-w-0">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
 
 export function ModelSidebar({ playground }: ModelSidebarProps) {
   const {
@@ -28,6 +57,7 @@ export function ModelSidebar({ playground }: ModelSidebarProps) {
     selectedModelId,
     selectedModel,
     config,
+    serverAddress,
     sessionActive,
     canStart,
     phase,
@@ -37,6 +67,8 @@ export function ModelSidebar({ playground }: ModelSidebarProps) {
     cameraError,
     setSelectedModelId,
     setConfigValue,
+    setServerAddress,
+    commitServerAddress,
     reloadCatalog,
     start,
     stop,
@@ -53,7 +85,7 @@ export function ModelSidebar({ playground }: ModelSidebarProps) {
       <Separator />
 
       <div className="min-w-0 space-y-3 px-4 py-4">
-        <div className="min-w-0 space-y-1.5 overflow-hidden">
+        <div className="min-w-0 space-y-1.5 overflow-visible">
           <Label className="block truncate" htmlFor="model-selector">
             Model
           </Label>
@@ -83,13 +115,9 @@ export function ModelSidebar({ playground }: ModelSidebarProps) {
 
       <Separator />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="min-w-0 px-4 pt-4 pb-2">
-          <p className="truncate text-sm font-medium">Configuration</p>
-          <p className="truncate text-xs text-muted-foreground">Applied when the Session starts</p>
-        </div>
-        <ScrollArea className="min-h-0 min-w-0 flex-1">
-          <div className="min-w-0 overflow-x-hidden px-4 pb-4">
+      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+        <ConfigSection subtitle="Applied when the Session starts" title="Model Configuration">
+          <div className="min-w-0 overflow-x-hidden px-4.5 pt-3.5 pb-4.5">
             {selectedModel ? (
               <SchemaForm
                 disabled={sessionActive}
@@ -103,7 +131,33 @@ export function ModelSidebar({ playground }: ModelSidebarProps) {
               </p>
             )}
           </div>
-        </ScrollArea>
+        </ConfigSection>
+
+        <Separator />
+
+        <ConfigSection subtitle="Used for Catalog and Session" title="Server Configuration">
+          <div className="min-w-0 space-y-1.5 overflow-x-hidden px-4.5 pt-3.5 pb-4.5">
+            <Label className="block truncate" htmlFor="server-address">
+              Server Address
+            </Label>
+            <Input
+              autoComplete="off"
+              disabled={sessionActive}
+              id="server-address"
+              onBlur={commitServerAddress}
+              onChange={(event) => setServerAddress(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.currentTarget.blur();
+                }
+              }}
+              placeholder={DEFAULT_GATEWAY_ADDRESS}
+              spellCheck={false}
+              type="text"
+              value={serverAddress}
+            />
+          </div>
+        </ConfigSection>
       </div>
 
       <Separator />

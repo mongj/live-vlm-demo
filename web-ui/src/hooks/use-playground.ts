@@ -2,7 +2,7 @@
 
 import { fetchCatalog, type CatalogModel } from "@/lib/catalog";
 import { captureJpegBase64, FRAME_INTERVAL_MS, waitForVideoFrame } from "@/lib/capture";
-import { getRealtimeUrl } from "@/lib/gateway";
+import { DEFAULT_GATEWAY_ADDRESS, getRealtimeUrl, parseGatewayAddress } from "@/lib/gateway";
 import { defaultsFromSchema } from "@/lib/json-schema";
 import { encodeClientMessage, parseServerMessage } from "@/lib/protocol";
 import { useEffect, useRef, useState, type RefObject } from "react";
@@ -30,6 +30,7 @@ export type PlaygroundState = {
   models: CatalogModel[];
   selectedModelId: string;
   config: Record<string, unknown>;
+  serverAddress: string;
   selectedModel: CatalogModel | undefined;
   phase: SessionPhase;
   sessionId: string | null;
@@ -48,6 +49,8 @@ export type PlaygroundState = {
   videoRef: RefObject<HTMLVideoElement | null>;
   setSelectedModelId: (id: string) => void;
   setConfigValue: (key: string, value: unknown) => void;
+  setServerAddress: (value: string) => void;
+  commitServerAddress: () => void;
   reloadCatalog: () => void;
   start: () => Promise<void>;
   stop: () => void;
@@ -142,6 +145,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [config, setConfig] = useState<Record<string, unknown>>(() =>
     initialModels[0] ? defaultsFromSchema(initialModels[0].config_schema) : {}
   );
+  const [serverAddress, setServerAddressState] = useState(DEFAULT_GATEWAY_ADDRESS);
   const [phase, setPhase] = useState<SessionPhase>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [recoverableError, setRecoverableError] = useState<string | null>(null);
@@ -156,25 +160,51 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [isStreaming, setIsStreaming] = useState(false);
 
   const selectedModel = models.find((model) => model.id === selectedModelId);
+  const serverAddressRef = useRef(serverAddress);
+  const selectedModelIdRef = useRef(selectedModelId);
+  const selectedModelRef = useRef(selectedModel);
+  const configRef = useRef(config);
+  const fetchedOriginRef = useRef(parseGatewayAddress(DEFAULT_GATEWAY_ADDRESS));
+  serverAddressRef.current = serverAddress;
+  selectedModelIdRef.current = selectedModelId;
+  selectedModelRef.current = selectedModel;
+  configRef.current = config;
 
   function applyModel(model: CatalogModel) {
+    const nextConfig = defaultsFromSchema(model.config_schema);
     setSelectedModelIdState(model.id);
-    setConfig(defaultsFromSchema(model.config_schema));
+    setConfig(nextConfig);
+    selectedModelIdRef.current = model.id;
+    selectedModelRef.current = model;
+    configRef.current = nextConfig;
   }
 
   async function loadCatalog() {
     setCatalogStatus("loading");
     setCatalogError(null);
     try {
-      const nextModels = await fetchCatalog();
+      const address = serverAddressRef.current;
+      const nextModels = await fetchCatalog(address);
       setModels(nextModels);
       setCatalogStatus("ready");
-      const current = nextModels.find((model) => model.id === selectedModelId);
+      const current = nextModels.find((model) => model.id === selectedModelIdRef.current);
       applyModel(current ?? nextModels[0]);
+      fetchedOriginRef.current = parseGatewayAddress(address);
     } catch (error) {
       setCatalogStatus("error");
       setCatalogError(error instanceof Error ? error.message : "Unable to load the model Catalog");
     }
+  }
+
+  function commitServerAddress() {
+    if (phase !== "idle") {
+      return;
+    }
+    const origin = parseGatewayAddress(serverAddressRef.current);
+    if (origin === fetchedOriginRef.current) {
+      return;
+    }
+    void loadCatalog();
   }
 
   function stopVideoPreview() {
@@ -548,7 +578,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   async function start() {
-    if (!selectedModel || phase !== "idle") {
+    if (phase !== "idle") {
       return;
     }
 
@@ -559,9 +589,27 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setMessages([]);
     setDebugEntries([]);
     setIsStreaming(false);
-
     setPhase("connecting");
-    const socket = new WebSocket(getRealtimeUrl());
+
+    if (parseGatewayAddress(serverAddressRef.current) !== fetchedOriginRef.current) {
+      await loadCatalog();
+    }
+    if (generation !== generationRef.current) {
+      return;
+    }
+    if (parseGatewayAddress(serverAddressRef.current) !== fetchedOriginRef.current) {
+      setPhase("idle");
+      return;
+    }
+
+    const model = selectedModelRef.current;
+    const sessionConfig = configRef.current;
+    if (!model) {
+      setPhase("idle");
+      return;
+    }
+
+    const socket = new WebSocket(getRealtimeUrl(serverAddressRef.current));
     socketRef.current = socket;
 
     socket.onopen = () => {
@@ -571,8 +619,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       socket.send(
         encodeClientMessage({
           type: "session.start",
-          model: selectedModel.id,
-          config,
+          model: model.id,
+          config: sessionConfig,
         })
       );
     };
@@ -673,6 +721,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     models,
     selectedModelId,
     config,
+    serverAddress,
     selectedModel,
     phase,
     sessionId,
@@ -702,7 +751,20 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       if (sessionActive) {
         return;
       }
-      setConfig((current) => ({ ...current, [key]: value }));
+      setConfig((current) => {
+        const next = { ...current, [key]: value };
+        configRef.current = next;
+        return next;
+      });
+    },
+    setServerAddress: (value: string) => {
+      if (sessionActive) {
+        return;
+      }
+      setServerAddressState(value);
+    },
+    commitServerAddress: () => {
+      commitServerAddress();
     },
     reloadCatalog: () => {
       if (sessionActive) {
