@@ -20,6 +20,8 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 
 export type CameraViewState = "empty" | "permission" | "connecting" | "live" | "error";
 
+export type VideoSourceKind = "none" | "camera" | "file";
+
 export type SessionPhase = "idle" | "connecting" | "live";
 
 export type TranscriptMessage = {
@@ -52,7 +54,10 @@ export type PlaygroundState = {
   fatalError: string | null;
   cameraError: string | null;
   cameraView: CameraViewState;
+  videoSource: VideoSourceKind;
   previewStream: MediaStream | null;
+  videoFileUrl: string | null;
+  videoFileName: string | null;
   cameraOn: boolean;
   micOn: boolean;
   micError: string | null;
@@ -73,6 +78,9 @@ export type PlaygroundState = {
   sendText: (text: string) => Promise<void>;
   toggleCamera: () => void;
   toggleMicrophone: () => void;
+  selectVideoFile: (file: File) => void;
+  clearVideoFile: () => void;
+  reportVideoFileError: () => void;
 };
 
 const CAMERA_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
@@ -138,6 +146,17 @@ function stopMediaStream(stream: MediaStream | null) {
   }
 }
 
+function videoFileErrorMessage(): string {
+  return "The browser could not play this video file";
+}
+
+function revokeObjectUrl(url: string | null) {
+  if (!url) {
+    return;
+  }
+  URL.revokeObjectURL(url);
+}
+
 export function usePlayground(initialModels: CatalogModel[], initialCatalogError: string | null): PlaygroundState {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -150,11 +169,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const lastSentTRef = useRef<number | null>(null);
   const generationRef = useRef(0);
   const cameraRequestIdRef = useRef(0);
+  const fileRequestIdRef = useRef(0);
   const micRequestIdRef = useRef(0);
   const captureTailRef = useRef(Promise.resolve());
   const liveRef = useRef(false);
-  const cameraLiveRef = useRef(false);
+  const sourceLiveRef = useRef(false);
   const cameraInFlightRef = useRef(false);
+  const fileUrlRef = useRef<string | null>(null);
+  const videoSourceRef = useRef<VideoSourceKind>("none");
   const micInFlightRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
   const streamingUserIdRef = useRef<string | null>(null);
@@ -184,7 +206,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraView, setCameraView] = useState<CameraViewState>("empty");
+  const [videoSource, setVideoSource] = useState<VideoSourceKind>("none");
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
+  const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
+  const [videoFileName, setVideoFileName] = useState<string | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -242,8 +267,29 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     void loadCatalog();
   }
 
-  function stopVideoPreview() {
-    cameraLiveRef.current = false;
+  function applyVideoSource(next: VideoSourceKind) {
+    videoSourceRef.current = next;
+    setVideoSource(next);
+  }
+
+  function revokeFileUrl() {
+    revokeObjectUrl(fileUrlRef.current);
+    fileUrlRef.current = null;
+  }
+
+  function detachFileFromVideo() {
+    const video = videoRef.current;
+    if (!video || video.srcObject) {
+      return;
+    }
+    if (video.getAttribute("src")) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+  }
+
+  function stopCameraPreview() {
     const stream = videoStreamRef.current;
     videoStreamRef.current = null;
     setPreviewStream(null);
@@ -252,6 +298,17 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (video) {
       video.srcObject = null;
     }
+  }
+
+  function stopVideoPreview() {
+    sourceLiveRef.current = false;
+    stopCameraPreview();
+  }
+
+  function clearFileSourceState() {
+    revokeFileUrl();
+    setVideoFileUrl(null);
+    setVideoFileName(null);
   }
 
   function stopMicrophoneTracks() {
@@ -439,7 +496,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function sendLiveFrame() {
-    if (!liveRef.current || !cameraLiveRef.current) {
+    if (!liveRef.current || !sourceLiveRef.current) {
       return;
     }
     const socket = socketRef.current;
@@ -688,12 +745,18 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setCameraOn(false);
     setCameraError(null);
     setCameraView("empty");
+    applyVideoSource("none");
   }
 
   async function enableCamera() {
     const requestId = cameraRequestIdRef.current + 1;
     cameraRequestIdRef.current = requestId;
+    fileRequestIdRef.current += 1;
     cameraInFlightRef.current = true;
+    sourceLiveRef.current = false;
+    detachFileFromVideo();
+    clearFileSourceState();
+    applyVideoSource("camera");
     setCameraError(null);
     setCameraView("permission");
     try {
@@ -713,6 +776,9 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       setPreviewStream(stream);
       const video = videoRef.current;
       if (video) {
+        if (video.getAttribute("src")) {
+          video.removeAttribute("src");
+        }
         video.srcObject = stream;
         await video.play().catch(() => undefined);
         await waitForVideoFrame(video);
@@ -721,7 +787,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         stopVideoPreview();
         return;
       }
-      cameraLiveRef.current = true;
+      sourceLiveRef.current = true;
       cameraInFlightRef.current = false;
       setCameraOn(true);
       setCameraView("live");
@@ -744,11 +810,130 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function toggleCamera() {
-    if (cameraLiveRef.current || cameraInFlightRef.current) {
-      disableCamera();
+    switch (videoSourceRef.current) {
+      case "file":
+        void enableCamera();
+        return;
+      case "camera":
+        if (sourceLiveRef.current || cameraInFlightRef.current) {
+          disableCamera();
+          return;
+        }
+        void enableCamera();
+        return;
+      case "none":
+        if (cameraInFlightRef.current) {
+          disableCamera();
+          return;
+        }
+        void enableCamera();
+        return;
+      default: {
+        const exhaustive: never = videoSourceRef.current;
+        return exhaustive;
+      }
+    }
+  }
+
+  async function attachVideoFile(url: string, requestId: number): Promise<void> {
+    const video = videoRef.current;
+    if (!video) {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+    }
+    const element = videoRef.current;
+    if (!element) {
+      throw new Error("Video preview is not available");
+    }
+    if (requestId !== fileRequestIdRef.current) {
       return;
     }
-    void enableCamera();
+    if (element.srcObject) {
+      element.srcObject = null;
+    }
+    element.loop = true;
+    element.muted = true;
+    element.playsInline = true;
+    if (element.src !== url) {
+      element.src = url;
+    }
+    void element.play().catch(() => undefined);
+    const ready = await waitForVideoFrame(element);
+    if (requestId !== fileRequestIdRef.current) {
+      return;
+    }
+    if (!ready || element.error) {
+      throw new Error(videoFileErrorMessage());
+    }
+    void element.play().catch(() => undefined);
+  }
+
+  async function selectVideoFile(file: File) {
+    const requestId = fileRequestIdRef.current + 1;
+    fileRequestIdRef.current = requestId;
+    cameraRequestIdRef.current += 1;
+    cameraInFlightRef.current = false;
+    sourceLiveRef.current = false;
+    stopCameraPreview();
+    detachFileFromVideo();
+    revokeFileUrl();
+
+    setCameraOn(false);
+    setCameraError(null);
+    applyVideoSource("file");
+    setVideoFileName(file.name);
+    setCameraView("connecting");
+
+    const url = URL.createObjectURL(file);
+    fileUrlRef.current = url;
+    setVideoFileUrl(url);
+
+    try {
+      await attachVideoFile(url, requestId);
+    } catch (error) {
+      if (requestId !== fileRequestIdRef.current) {
+        return;
+      }
+      sourceLiveRef.current = false;
+      setCameraError(error instanceof Error ? error.message : videoFileErrorMessage());
+      setCameraView("error");
+      return;
+    }
+
+    if (requestId !== fileRequestIdRef.current) {
+      return;
+    }
+
+    sourceLiveRef.current = true;
+    setCameraView("live");
+    if (liveRef.current) {
+      void enqueueCapture(async () => {
+        sendLiveFrame();
+      });
+    }
+  }
+
+  function clearVideoFile() {
+    if (videoSourceRef.current !== "file" && !fileUrlRef.current) {
+      return;
+    }
+    fileRequestIdRef.current += 1;
+    sourceLiveRef.current = false;
+    clearFileSourceState();
+    detachFileFromVideo();
+    applyVideoSource("none");
+    setCameraError(null);
+    setCameraView("empty");
+  }
+
+  function reportVideoFileError() {
+    if (videoSourceRef.current !== "file") {
+      return;
+    }
+    sourceLiveRef.current = false;
+    setCameraError(videoFileErrorMessage());
+    setCameraView("error");
   }
 
   function disableMicrophone() {
@@ -983,8 +1168,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         setRecoverableError("Start a Session before sending a message");
         return;
       }
-      if (!cameraLiveRef.current) {
-        setRecoverableError("Turn on the camera to send a Frame with your message");
+      if (!sourceLiveRef.current) {
+        setRecoverableError("Turn on the camera or upload a video to send a Frame with your message");
         return;
       }
       const video = videoRef.current;
@@ -993,7 +1178,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       }
       const frame = captureFrame();
       if (!frame) {
-        setRecoverableError("Could not capture a camera frame");
+        setRecoverableError("Could not capture a video frame");
         return;
       }
       const sent = sendFeed(frame, trimmed);
@@ -1019,10 +1204,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     return () => {
       generationRef.current += 1;
       cameraRequestIdRef.current += 1;
+      fileRequestIdRef.current += 1;
       micRequestIdRef.current += 1;
       endingRef.current?.reject(new Error("unmounted"));
       cleanupSession();
       stopVideoPreview();
+      clearFileSourceState();
       stopMicrophoneTracks();
     };
     // Session and media resources are stored in refs and must be released on unmount.
@@ -1046,7 +1233,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     fatalError,
     cameraError,
     cameraView,
+    videoSource,
     previewStream,
+    videoFileUrl,
+    videoFileName,
     cameraOn,
     micOn,
     micError,
@@ -1096,5 +1286,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     sendText,
     toggleCamera,
     toggleMicrophone,
+    selectVideoFile: (file: File) => {
+      void selectVideoFile(file);
+    },
+    clearVideoFile,
+    reportVideoFileError,
   };
 }

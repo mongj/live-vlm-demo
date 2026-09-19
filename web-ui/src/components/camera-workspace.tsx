@@ -3,14 +3,17 @@
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { CameraViewState } from "@/hooks/use-playground";
+import type { CameraViewState, VideoSourceKind } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
-import { MicIcon, MicOffIcon, VideoIcon, VideoOffIcon } from "lucide-react";
-import { useEffect, useRef, type Ref, type RefObject } from "react";
+import { MicIcon, MicOffIcon, UploadIcon, VideoIcon, VideoOffIcon, XIcon } from "lucide-react";
+import { useEffect, useRef, type ChangeEvent, type Ref, type RefObject } from "react";
 
 type CameraWorkspaceProps = {
   videoRef: Ref<HTMLVideoElement | null>;
   previewStream: MediaStream | null;
+  videoFileUrl: string | null;
+  videoFileName: string | null;
+  videoSource: VideoSourceKind;
   cameraView: CameraViewState;
   cameraError: string | null;
   cameraOn: boolean;
@@ -20,6 +23,9 @@ type CameraWorkspaceProps = {
   stageClassName?: string;
   onToggleCamera: () => void;
   onToggleMicrophone: () => void;
+  onSelectVideoFile: (file: File) => void;
+  onClearVideoFile: () => void;
+  onVideoFileError: () => void;
 };
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T) {
@@ -35,7 +41,8 @@ function assignRef<T>(ref: Ref<T> | undefined, value: T) {
 
 function overlayCopy(
   view: CameraViewState,
-  cameraError: string | null
+  cameraError: string | null,
+  videoSource: VideoSourceKind
 ): {
   title: string;
   body: string;
@@ -43,8 +50,8 @@ function overlayCopy(
   switch (view) {
     case "empty":
       return {
-        title: "Camera is off",
-        body: "Turn on the camera to preview the feed.",
+        title: "No video source",
+        body: "Turn on the camera or upload a clip to preview the feed.",
       };
     case "permission":
       return {
@@ -52,17 +59,43 @@ function overlayCopy(
         body: cameraError ?? "Allow camera access when the browser prompts you.",
       };
     case "connecting":
-      return {
-        title: "Starting camera",
-        body: "Connecting to the camera.",
-      };
+      switch (videoSource) {
+        case "file":
+          return {
+            title: "Loading video",
+            body: "Preparing the uploaded clip.",
+          };
+        case "camera":
+        case "none":
+          return {
+            title: "Starting camera",
+            body: "Connecting to the camera.",
+          };
+        default: {
+          const exhaustive: never = videoSource;
+          return exhaustive;
+        }
+      }
     case "live":
       return null;
     case "error":
-      return {
-        title: "Camera unavailable",
-        body: cameraError ?? "The camera could not be started.",
-      };
+      switch (videoSource) {
+        case "file":
+          return {
+            title: "Video unavailable",
+            body: cameraError ?? "The browser could not play this video file.",
+          };
+        case "camera":
+        case "none":
+          return {
+            title: "Camera unavailable",
+            body: cameraError ?? "The camera could not be started.",
+          };
+        default: {
+          const exhaustive: never = videoSource;
+          return exhaustive;
+        }
+      }
     default: {
       const exhaustive: never = view;
       return exhaustive;
@@ -82,6 +115,38 @@ function isCameraEngaged(view: CameraViewState, cameraError: string | null): boo
       return false;
     default: {
       const exhaustive: never = view;
+      return exhaustive;
+    }
+  }
+}
+
+function isCameraButtonEngaged(
+  view: CameraViewState,
+  cameraError: string | null,
+  videoSource: VideoSourceKind
+): boolean {
+  switch (videoSource) {
+    case "file":
+      return false;
+    case "none":
+    case "camera":
+      return isCameraEngaged(view, cameraError);
+    default: {
+      const exhaustive: never = videoSource;
+      return exhaustive;
+    }
+  }
+}
+
+function isFileSourceActive(videoSource: VideoSourceKind): boolean {
+  switch (videoSource) {
+    case "file":
+      return true;
+    case "none":
+    case "camera":
+      return false;
+    default: {
+      const exhaustive: never = videoSource;
       return exhaustive;
     }
   }
@@ -111,9 +176,76 @@ function cameraStatusDotClass(sessionLive: boolean): string {
   return sessionLive ? "bg-destructive" : "bg-primary";
 }
 
+function previewAttachKind(
+  previewStream: MediaStream | null,
+  videoFileUrl: string | null
+): "camera" | "file" | "none" {
+  if (previewStream) {
+    return "camera";
+  }
+  if (videoFileUrl) {
+    return "file";
+  }
+  return "none";
+}
+
+function attachPreview(
+  video: HTMLVideoElement,
+  previewStream: MediaStream | null,
+  videoFileUrl: string | null
+) {
+  const kind = previewAttachKind(previewStream, videoFileUrl);
+  switch (kind) {
+    case "camera":
+      if (video.getAttribute("src")) {
+        video.removeAttribute("src");
+      }
+      if (previewStream && video.srcObject !== previewStream) {
+        video.srcObject = previewStream;
+        void video.play().catch(() => undefined);
+      }
+      return;
+    case "file":
+      if (video.srcObject) {
+        video.srcObject = null;
+      }
+      if (videoFileUrl && video.src !== videoFileUrl) {
+        video.src = videoFileUrl;
+      }
+      video.loop = true;
+      video.muted = true;
+      void video.play().catch(() => undefined);
+      return;
+    case "none":
+      if (video.srcObject) {
+        video.srcObject = null;
+      }
+      if (video.getAttribute("src")) {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+      return;
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
+  }
+}
+
+function fileControlLabel(fileActive: boolean, videoFileName: string | null): string {
+  if (!fileActive) {
+    return "Upload video";
+  }
+  return videoFileName ? `Clear video (${videoFileName})` : "Clear video";
+}
+
 export function CameraWorkspace({
   videoRef,
   previewStream,
+  videoFileUrl,
+  videoFileName,
+  videoSource,
   cameraView,
   cameraError,
   cameraOn,
@@ -123,31 +255,51 @@ export function CameraWorkspace({
   stageClassName,
   onToggleCamera,
   onToggleMicrophone,
+  onSelectVideoFile,
+  onClearVideoFile,
+  onVideoFileError,
 }: CameraWorkspaceProps) {
-  const overlay = overlayCopy(cameraView, cameraError);
+  const overlay = overlayCopy(cameraView, cameraError, videoSource);
   const showVideo = showCameraVideo(cameraView);
-  const cameraEngaged = isCameraEngaged(cameraView, cameraError);
+  const cameraEngaged = isCameraButtonEngaged(cameraView, cameraError, videoSource);
   const cameraPending = cameraEngaged && !cameraOn;
   const cameraLabel = cameraEngaged ? "Turn camera off" : "Turn camera on";
   const micLabel = micOn ? "Turn microphone off" : "Turn microphone on";
+  const fileActive = isFileSourceActive(videoSource);
+  const filePending = fileActive && cameraView === "connecting";
+  const fileLabel = fileControlLabel(fileActive, videoFileName);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const video = localVideoRef.current;
     if (!video) {
       return;
     }
-    if (previewStream) {
-      if (video.srcObject !== previewStream) {
-        video.srcObject = previewStream;
-        void video.play().catch(() => undefined);
-      }
+    attachPreview(video, previewStream, videoFileUrl);
+  }, [previewStream, videoFileUrl]);
+
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) {
+      onSelectVideoFile(file);
+    }
+  }
+
+  function handleFileControlClick() {
+    if (fileActive) {
+      onClearVideoFile();
       return;
     }
-    if (video.srcObject) {
-      video.srcObject = null;
-    }
-  }, [previewStream]);
+    fileInputRef.current?.click();
+  }
+
+  function handleVideoEnded(event: { currentTarget: HTMLVideoElement }) {
+    const video = event.currentTarget;
+    video.currentTime = 0;
+    void video.play().catch(() => undefined);
+  }
 
   return (
     <main className="flex h-full min-h-0 min-w-0 flex-col bg-camera-stage">
@@ -156,7 +308,19 @@ export function CameraWorkspace({
           <video
             autoPlay
             className={cn("absolute inset-0 size-full object-contain", !showVideo && "opacity-0")}
+            loop
             muted
+            onEnded={handleVideoEnded}
+            onError={() => {
+              const video = localVideoRef.current;
+              if (!video || !videoFileUrl) {
+                return;
+              }
+              if (video.src !== videoFileUrl && video.currentSrc !== videoFileUrl) {
+                return;
+              }
+              onVideoFileError();
+            }}
             playsInline
             ref={(node) => {
               localVideoRef.current = node;
@@ -218,7 +382,38 @@ export function CameraWorkspace({
                 </TooltipTrigger>
                 <TooltipContent>{micLabel}</TooltipContent>
               </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-label={fileLabel}
+                    aria-pressed={fileActive}
+                    className="size-12 rounded-full [&_svg:not([class*='size-'])]:size-5"
+                    onClick={handleFileControlClick}
+                    size="icon"
+                    type="button"
+                    variant={fileActive ? "secondary" : "outline"}
+                  >
+                    {filePending ? (
+                      <Spinner className="size-5" />
+                    ) : fileActive ? (
+                      <XIcon />
+                    ) : (
+                      <UploadIcon />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{fileLabel}</TooltipContent>
+              </Tooltip>
             </div>
+            <input
+              accept="video/*"
+              aria-hidden
+              className="hidden"
+              onChange={handleFileChange}
+              ref={fileInputRef}
+              tabIndex={-1}
+              type="file"
+            />
           </div>
         </div>
       </div>

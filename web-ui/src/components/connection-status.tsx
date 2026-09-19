@@ -1,6 +1,6 @@
 "use client";
 
-import type { SessionPhase } from "@/hooks/use-playground";
+import type { SessionPhase, VideoSourceKind } from "@/hooks/use-playground";
 
 type ConnectionStatusProps = {
   catalogStatus: "loading" | "ready" | "error";
@@ -10,6 +10,7 @@ type ConnectionStatusProps = {
   recoverableError: string | null;
   fatalError: string | null;
   cameraError: string | null;
+  videoSource: VideoSourceKind;
 };
 
 function statusDotClass(tone: "idle" | "busy" | "live" | "error"): string {
@@ -45,7 +46,17 @@ function describeStatus(props: ConnectionStatusProps): {
     };
   }
   if (props.cameraError) {
-    return { label: "Camera", detail: props.cameraError, tone: "error" };
+    switch (props.videoSource) {
+      case "file":
+        return { label: "Video file", detail: props.cameraError, tone: "error" };
+      case "camera":
+      case "none":
+        return { label: "Camera", detail: props.cameraError, tone: "error" };
+      default: {
+        const exhaustive: never = props.videoSource;
+        return exhaustive;
+      }
+    }
   }
   if (props.fatalError) {
     return { label: "Session ended", detail: props.fatalError, tone: "error" };

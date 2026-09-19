@@ -204,7 +204,7 @@ export function TranscriptPanel({
         <PromptInputTextarea
           className={textareaClass(density)}
           disabled={!sessionActive}
-          placeholder={sessionActive ? "Ask about what the camera sees" : "Start a Session to send a message"}
+          placeholder={sessionActive ? "Ask about what the video shows" : "Start a Session to send a message"}
           rows={textareaRows(density)}
         />
         <ComposerSubmit density={density} isStreaming={isStreaming} sessionActive={sessionActive} />

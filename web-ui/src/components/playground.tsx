@@ -87,12 +87,18 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       cameraView={playground.cameraView}
       micError={playground.micError}
       micOn={playground.micOn}
+      onClearVideoFile={playground.clearVideoFile}
+      onSelectVideoFile={playground.selectVideoFile}
       onToggleCamera={playground.toggleCamera}
       onToggleMicrophone={playground.toggleMicrophone}
+      onVideoFileError={playground.reportVideoFileError}
       previewStream={playground.previewStream}
       sessionLive={playground.phase === "live"}
       stageClassName={isDesktop ? undefined : "p-3"}
+      videoFileName={playground.videoFileName}
+      videoFileUrl={playground.videoFileUrl}
       videoRef={playground.videoRef}
+      videoSource={playground.videoSource}
     />
   );
 

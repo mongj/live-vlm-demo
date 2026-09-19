@@ -16,7 +16,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import type { PlaygroundState } from "@/hooks/use-playground";
 import { MAX_FRAMES_PER_SECOND, MIN_FRAMES_PER_SECOND } from "@/lib/capture";
-import { DEFAULT_GATEWAY_ADDRESS } from "@/lib/gateway";
+import { GATEWAY_ADDRESS_PLACEHOLDER } from "@/lib/gateway";
 import { ChevronDownIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -145,7 +145,7 @@ export function ClientConfigSection({
   const { framesPerSecond, setFramesPerSecond } = playground;
 
   return (
-    <ConfigSection defaultOpen={false} subtitle="Applied to the camera feed" title="Client Configuration">
+    <ConfigSection defaultOpen={false} subtitle="Applied to the camera or uploaded video" title="Client Configuration">
       <div className="flex min-w-0 flex-col gap-1.5 overflow-x-hidden px-4.5 pt-3.5 pb-4.5">
         <Label className="block truncate" htmlFor={id}>
           Frames Per Second
@@ -198,7 +198,7 @@ export function ServerConfigSection({
               event.currentTarget.blur();
             }
           }}
-          placeholder={DEFAULT_GATEWAY_ADDRESS}
+          placeholder={GATEWAY_ADDRESS_PLACEHOLDER}
           spellCheck={false}
           type="text"
           value={serverAddress}
@@ -270,6 +270,7 @@ export function PlaygroundConnectionStatus({ playground }: PlaygroundConfigProps
       phase={playground.phase}
       recoverableError={playground.recoverableError}
       sessionId={playground.sessionId}
+      videoSource={playground.videoSource}
     />
   );
 }
