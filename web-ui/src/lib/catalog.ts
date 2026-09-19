@@ -44,6 +44,6 @@ async function readCatalog(url: string): Promise<CatalogModel[]> {
   return models;
 }
 
-export async function fetchCatalog(): Promise<CatalogModel[]> {
-  return readCatalog(getCatalogUrl());
+export async function fetchCatalog(gatewayAddress?: string): Promise<CatalogModel[]> {
+  return readCatalog(getCatalogUrl(gatewayAddress));
 }
