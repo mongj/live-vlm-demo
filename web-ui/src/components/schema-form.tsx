@@ -52,7 +52,7 @@ function SchemaField({
 
   if (type === "object" && field.properties) {
     return (
-      <div className="min-w-0 space-y-3 overflow-hidden">
+      <div className="min-w-0 space-y-3 overflow-visible">
         <div className="min-w-0 space-y-1">
           <p className="truncate text-sm font-medium">{title}</p>
           {description ? (
@@ -82,7 +82,7 @@ function SchemaField({
 
   if (type === "boolean") {
     return (
-      <div className="flex min-w-0 items-start justify-between gap-3 overflow-hidden">
+      <div className="flex min-w-0 items-start justify-between gap-3 overflow-visible">
         <div className="min-w-0 space-y-1 overflow-hidden">
           <Label className="block truncate" htmlFor={id}>
             {title}
@@ -104,7 +104,7 @@ function SchemaField({
   if (enums) {
     const current = typeof value === "string" && enums.includes(value) ? value : (enums[0] ?? "");
     return (
-      <div className="min-w-0 space-y-1.5 overflow-hidden">
+      <div className="min-w-0 space-y-1.5 overflow-visible">
         <Label className="block truncate" htmlFor={id}>
           {title}
         </Label>
@@ -134,7 +134,7 @@ function SchemaField({
   if (type === "integer" || type === "number") {
     const numeric = typeof value === "number" && Number.isFinite(value) ? value : (field.default as number | undefined) ?? field.minimum ?? 0;
     return (
-      <div className="min-w-0 space-y-1.5 overflow-hidden">
+      <div className="min-w-0 space-y-1.5 overflow-visible">
         <Label className="block truncate" htmlFor={id}>
           {title}
         </Label>
@@ -166,7 +166,7 @@ function SchemaField({
 
   if (type === "string") {
     return (
-      <div className="min-w-0 space-y-1.5 overflow-hidden">
+      <div className="min-w-0 space-y-1.5 overflow-visible">
         <Label className="block truncate" htmlFor={id}>
           {title}
         </Label>
@@ -195,7 +195,7 @@ export function SchemaForm({ schema, values, disabled, onChange }: SchemaFormPro
   }
 
   return (
-    <div className="min-w-0 space-y-4 overflow-hidden">
+    <div className="min-w-0 space-y-4 overflow-visible">
       {Object.entries(properties).map(([name, fieldSchema]) => (
         <SchemaField
           disabled={disabled}
