@@ -1,6 +1,20 @@
 export const MAX_FRAME_WIDTH = 1280;
 export const MAX_FRAME_HEIGHT = 720;
-export const FRAME_INTERVAL_MS = 1000;
+export const DEFAULT_FRAMES_PER_SECOND = 1;
+export const MIN_FRAMES_PER_SECOND = 1;
+export const MAX_FRAMES_PER_SECOND = 8;
+export const FRAME_INTERVAL_MS = 1000 / DEFAULT_FRAMES_PER_SECOND;
+
+export function clampFramesPerSecond(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_FRAMES_PER_SECOND;
+  }
+  return Math.min(MAX_FRAMES_PER_SECOND, Math.max(MIN_FRAMES_PER_SECOND, Math.round(value)));
+}
+
+export function frameIntervalMs(fps: number): number {
+  return 1000 / clampFramesPerSecond(fps);
+}
 
 const JPEG_DATA_URL_PREFIX = "data:image/jpeg;base64,";
 

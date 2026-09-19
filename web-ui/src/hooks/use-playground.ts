@@ -1,7 +1,13 @@
 "use client";
 
 import { fetchCatalog, type CatalogModel } from "@/lib/catalog";
-import { captureJpegBase64, FRAME_INTERVAL_MS, waitForVideoFrame } from "@/lib/capture";
+import {
+  captureJpegBase64,
+  DEFAULT_FRAMES_PER_SECOND,
+  clampFramesPerSecond,
+  frameIntervalMs,
+  waitForVideoFrame,
+} from "@/lib/capture";
 import { DEFAULT_GATEWAY_ADDRESS, getRealtimeUrl, parseGatewayAddress } from "@/lib/gateway";
 import { defaultsFromSchema } from "@/lib/json-schema";
 import { encodeClientMessage, parseServerMessage } from "@/lib/protocol";
@@ -31,6 +37,7 @@ export type PlaygroundState = {
   selectedModelId: string;
   config: Record<string, unknown>;
   serverAddress: string;
+  framesPerSecond: number;
   selectedModel: CatalogModel | undefined;
   phase: SessionPhase;
   sessionId: string | null;
@@ -38,6 +45,7 @@ export type PlaygroundState = {
   fatalError: string | null;
   cameraError: string | null;
   cameraView: CameraViewState;
+  previewStream: MediaStream | null;
   cameraOn: boolean;
   micOn: boolean;
   micError: string | null;
@@ -51,6 +59,7 @@ export type PlaygroundState = {
   setConfigValue: (key: string, value: unknown) => void;
   setServerAddress: (value: string) => void;
   commitServerAddress: () => void;
+  setFramesPerSecond: (value: number) => void;
   reloadCatalog: () => void;
   start: () => Promise<void>;
   stop: () => void;
@@ -146,12 +155,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     initialModels[0] ? defaultsFromSchema(initialModels[0].config_schema) : {}
   );
   const [serverAddress, setServerAddressState] = useState(DEFAULT_GATEWAY_ADDRESS);
+  const [framesPerSecond, setFramesPerSecondState] = useState(DEFAULT_FRAMES_PER_SECOND);
   const [phase, setPhase] = useState<SessionPhase>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [recoverableError, setRecoverableError] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraView, setCameraView] = useState<CameraViewState>("empty");
+  const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -164,11 +175,13 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const selectedModelIdRef = useRef(selectedModelId);
   const selectedModelRef = useRef(selectedModel);
   const configRef = useRef(config);
+  const framesPerSecondRef = useRef(framesPerSecond);
   const fetchedOriginRef = useRef(parseGatewayAddress(DEFAULT_GATEWAY_ADDRESS));
   serverAddressRef.current = serverAddress;
   selectedModelIdRef.current = selectedModelId;
   selectedModelRef.current = selectedModel;
   configRef.current = config;
+  framesPerSecondRef.current = framesPerSecond;
 
   function applyModel(model: CatalogModel) {
     const nextConfig = defaultsFromSchema(model.config_schema);
@@ -211,6 +224,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     cameraLiveRef.current = false;
     const stream = videoStreamRef.current;
     videoStreamRef.current = null;
+    setPreviewStream(null);
     stopMediaStream(stream);
     const video = videoRef.current;
     if (video) {
@@ -329,7 +343,19 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       void enqueueCapture(async () => {
         sendLiveFrame();
       });
-    }, FRAME_INTERVAL_MS);
+    }, frameIntervalMs(framesPerSecondRef.current));
+  }
+
+  function applyFramesPerSecond(value: number) {
+    const next = clampFramesPerSecond(value);
+    if (next === framesPerSecondRef.current) {
+      return;
+    }
+    framesPerSecondRef.current = next;
+    setFramesPerSecondState(next);
+    if (liveRef.current) {
+      startFrameLoop();
+    }
   }
 
   function handleServerPayload(raw: string) {
@@ -490,6 +516,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       }
       setCameraView("connecting");
       videoStreamRef.current = stream;
+      setPreviewStream(stream);
       const video = videoRef.current;
       if (video) {
         video.srcObject = stream;
@@ -722,6 +749,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     selectedModelId,
     config,
     serverAddress,
+    framesPerSecond,
     selectedModel,
     phase,
     sessionId,
@@ -729,6 +757,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     fatalError,
     cameraError,
     cameraView,
+    previewStream,
     cameraOn,
     micOn,
     micError,
@@ -766,6 +795,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     commitServerAddress: () => {
       commitServerAddress();
     },
+    setFramesPerSecond: applyFramesPerSecond,
     reloadCatalog: () => {
       if (sessionActive) {
         return;
