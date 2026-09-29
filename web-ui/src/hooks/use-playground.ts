@@ -1,5 +1,7 @@
 "use client";
 
+import { useAudioInputs, type AudioInputsState } from "@/hooks/use-audio-inputs";
+import { useMediaDevices, type MediaDevicesState } from "@/hooks/use-media-devices";
 import { fetchCatalog, type CatalogModel } from "@/lib/catalog";
 import {
   captureJpegBase64,
@@ -10,17 +12,30 @@ import {
 } from "@/lib/capture";
 import { DEFAULT_GATEWAY_ADDRESS, getRealtimeUrl, parseGatewayAddress } from "@/lib/gateway";
 import { defaultsFromSchema } from "@/lib/json-schema";
-import { encodePcmBase64, PcmCapture, PcmPlayer } from "@/lib/pcm";
+import {
+  assertSecureMediaContext,
+  cameraConstraints,
+  captureElementAudio,
+  DEFAULT_DEVICE_ID,
+  mediaDeviceErrorMessage,
+  stopMediaStream,
+} from "@/lib/media-devices";
+import { encodePcmBase64, PcmPlayer } from "@/lib/pcm";
 import {
   encodeClientMessage,
   inputTranscriptionFromRaw,
   parseServerMessage,
 } from "@/lib/protocol";
+import { getVideoLibrary } from "@/lib/video-library/library";
+import type { VideoPlayback, VideoRecord } from "@/lib/video-library/types";
 import { useEffect, useRef, useState, type RefObject } from "react";
 
 export type CameraViewState = "empty" | "permission" | "connecting" | "live" | "error";
 
 export type VideoSourceKind = "none" | "camera" | "file";
+
+/** The chosen video input, remembered while video is off. */
+export type VideoInput = { kind: "camera"; deviceId: string } | { kind: "library" };
 
 export type SessionPhase = "idle" | "connecting" | "live";
 
@@ -57,10 +72,12 @@ export type PlaygroundState = {
   videoSource: VideoSourceKind;
   previewStream: MediaStream | null;
   videoFileUrl: string | null;
-  videoFileName: string | null;
+  activeVideo: VideoRecord | null;
+  lastLibraryVideo: VideoRecord | null;
+  videoInput: VideoInput;
   cameraOn: boolean;
-  micOn: boolean;
-  micError: string | null;
+  audio: AudioInputsState;
+  devices: MediaDevicesState;
   messages: TranscriptMessage[];
   debugEntries: DebugRawEntry[];
   isStreaming: boolean;
@@ -76,17 +93,12 @@ export type PlaygroundState = {
   start: () => Promise<void>;
   stop: () => void;
   sendText: (text: string) => Promise<void>;
-  toggleCamera: () => void;
-  toggleMicrophone: () => void;
-  selectVideoFile: (file: File) => void;
-  clearVideoFile: () => void;
+  /** Turns the chosen video input on or off; frames are only sent while it is on. */
+  toggleVideo: () => void;
+  selectCamera: (deviceId: string) => void;
+  selectVideo: (video: VideoRecord) => void;
+  clearVideo: () => void;
   reportVideoFileError: () => void;
-};
-
-const CAMERA_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
-  facingMode: "user",
-  width: { ideal: 1280 },
-  height: { ideal: 720 },
 };
 
 const SESSION_END_ACK_TIMEOUT_MS = 8_000;
@@ -104,57 +116,8 @@ function hasRawOutput(raw: string | undefined): boolean {
   return typeof raw === "string" && raw.length > 0;
 }
 
-function deviceCopy(device: "camera" | "microphone"): { noun: string; label: string } {
-  switch (device) {
-    case "camera":
-      return { noun: "camera", label: "Camera" };
-    case "microphone":
-      return { noun: "microphone", label: "Microphone" };
-    default: {
-      const exhaustive: never = device;
-      return exhaustive;
-    }
-  }
-}
-
-function mediaDeviceErrorMessage(error: unknown, device: "camera" | "microphone"): string {
-  const { noun, label } = deviceCopy(device);
-  if (!(error instanceof Error)) {
-    return `${label} access failed`;
-  }
-  if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-    return `${label} permission was denied`;
-  }
-  if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
-    return `No ${noun} was found`;
-  }
-  if (error.name === "NotReadableError" || error.name === "TrackStartError") {
-    return `The ${noun} is already in use`;
-  }
-  if (error.name === "SecurityError") {
-    return `${label} access requires a secure browser context`;
-  }
-  return error.message || `${label} access failed`;
-}
-
-function stopMediaStream(stream: MediaStream | null) {
-  if (!stream) {
-    return;
-  }
-  for (const track of stream.getTracks()) {
-    track.stop();
-  }
-}
-
 function videoFileErrorMessage(): string {
   return "The browser could not play this video file";
-}
-
-function revokeObjectUrl(url: string | null) {
-  if (!url) {
-    return;
-  }
-  URL.revokeObjectURL(url);
 }
 
 export function usePlayground(initialModels: CatalogModel[], initialCatalogError: string | null): PlaygroundState {
@@ -162,22 +125,19 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
-  const audioStreamRef = useRef<MediaStream | null>(null);
-  const pcmCaptureRef = useRef<PcmCapture | null>(null);
+  const videoAudioStreamRef = useRef<MediaStream | null>(null);
   const pcmPlayerRef = useRef<PcmPlayer | null>(null);
   const frameTimerRef = useRef<number | null>(null);
   const lastSentTRef = useRef<number | null>(null);
   const generationRef = useRef(0);
   const cameraRequestIdRef = useRef(0);
   const fileRequestIdRef = useRef(0);
-  const micRequestIdRef = useRef(0);
   const captureTailRef = useRef(Promise.resolve());
   const liveRef = useRef(false);
   const sourceLiveRef = useRef(false);
   const cameraInFlightRef = useRef(false);
-  const fileUrlRef = useRef<string | null>(null);
+  const playbackRef = useRef<VideoPlayback | null>(null);
   const videoSourceRef = useRef<VideoSourceKind>("none");
-  const micInFlightRef = useRef(false);
   const streamingAssistantIdRef = useRef<string | null>(null);
   const streamingUserIdRef = useRef<string | null>(null);
   const streamingDebugIdRef = useRef<string | null>(null);
@@ -209,13 +169,26 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [videoSource, setVideoSource] = useState<VideoSourceKind>("none");
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
   const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
-  const [videoFileName, setVideoFileName] = useState<string | null>(null);
+  const [activeVideo, setActiveVideo] = useState<VideoRecord | null>(null);
+  const [lastLibraryVideo, setLastLibraryVideo] = useState<VideoRecord | null>(null);
+  const [videoInput, setVideoInput] = useState<VideoInput>({ kind: "camera", deviceId: DEFAULT_DEVICE_ID });
+  const [videoAudioStream, setVideoAudioStream] = useState<MediaStream | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
-  const [micOn, setMicOn] = useState(false);
-  const [micError, setMicError] = useState<string | null>(null);
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [debugEntries, setDebugEntries] = useState<DebugRawEntry[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+
+  const devices = useMediaDevices();
+  const audio = useAudioInputs({
+    capturing: phase === "live",
+    videoAudioStream,
+    onChunk: sendAudio,
+    onSpeechStart: maybeBargeInFromMic,
+    onPermissionGranted: devices.refresh,
+  });
+  const outputDeviceId = audio.outputDeviceId;
+  const outputDeviceIdRef = useRef(outputDeviceId);
+  outputDeviceIdRef.current = outputDeviceId;
 
   const selectedModel = models.find((model) => model.id === selectedModelId);
   const serverAddressRef = useRef(serverAddress);
@@ -272,9 +245,9 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setVideoSource(next);
   }
 
-  function revokeFileUrl() {
-    revokeObjectUrl(fileUrlRef.current);
-    fileUrlRef.current = null;
+  function releasePlayback() {
+    playbackRef.current?.release();
+    playbackRef.current = null;
   }
 
   function detachFileFromVideo() {
@@ -305,22 +278,39 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     stopCameraPreview();
   }
 
+  function releaseVideoAudio() {
+    stopMediaStream(videoAudioStreamRef.current);
+    videoAudioStreamRef.current = null;
+    setVideoAudioStream(null);
+  }
+
+  function attachVideoAudio(element: HTMLVideoElement) {
+    releaseVideoAudio();
+    const captured = captureElementAudio(element);
+    if (!captured) {
+      return;
+    }
+    videoAudioStreamRef.current = captured;
+    const publish = () => {
+      if (videoAudioStreamRef.current !== captured) {
+        return;
+      }
+      const hasAudio = captured.getAudioTracks().length > 0;
+      setVideoAudioStream(hasAudio ? captured : null);
+      if (hasAudio) {
+        audio.setVideoAudioSelected(true);
+      }
+    };
+    captured.addEventListener("addtrack", publish);
+    captured.addEventListener("removetrack", publish);
+    publish();
+  }
+
   function clearFileSourceState() {
-    revokeFileUrl();
+    releasePlayback();
+    releaseVideoAudio();
     setVideoFileUrl(null);
-    setVideoFileName(null);
-  }
-
-  function stopMicrophoneTracks() {
-    stopPcmCapture();
-    const stream = audioStreamRef.current;
-    audioStreamRef.current = null;
-    stopMediaStream(stream);
-  }
-
-  function stopPcmCapture() {
-    pcmCaptureRef.current?.stop();
-    pcmCaptureRef.current = null;
+    setActiveVideo(null);
   }
 
   function stopPcmPlayer() {
@@ -328,9 +318,15 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     pcmPlayerRef.current = null;
   }
 
+  function createPcmPlayer(): PcmPlayer {
+    const player = new PcmPlayer();
+    void player.setOutputDevice(outputDeviceIdRef.current).catch(() => undefined);
+    return player;
+  }
+
   function ensurePcmPlayer(): PcmPlayer {
     if (!pcmPlayerRef.current) {
-      pcmPlayerRef.current = new PcmPlayer();
+      pcmPlayerRef.current = createPcmPlayer();
     }
     return pcmPlayerRef.current;
   }
@@ -371,42 +367,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
   }
 
-  async function attachPcmCapture(stream: MediaStream) {
-    const capture = new PcmCapture(stream, sendAudio, maybeBargeInFromMic);
-    pcmCaptureRef.current = capture;
-    try {
-      await capture.start();
-      if (pcmCaptureRef.current !== capture) {
-        capture.stop();
-      }
-    } catch (error) {
-      if (pcmCaptureRef.current !== capture) {
-        return;
-      }
-      pcmCaptureRef.current = null;
-      capture.stop();
-      setMicError(mediaDeviceErrorMessage(error, "microphone"));
-    }
-  }
-
-  function syncPcmCapture() {
-    const stream = audioStreamRef.current;
-    if (liveRef.current && stream) {
-      if (pcmCaptureRef.current) {
-        return;
-      }
-      void attachPcmCapture(stream);
-      return;
-    }
-    stopPcmCapture();
-  }
-
-  function playReplyAudio(audio: string) {
+  function playReplyAudio(pcmBase64: string) {
     if (discardReplyAudioRef.current) {
       return;
     }
     const player = ensurePcmPlayer();
-    player.enqueue(audio);
+    player.enqueue(pcmBase64);
     void player.resume();
   }
 
@@ -451,7 +417,6 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   function cleanupSession() {
     stopFrameTimer();
     closeSocket();
-    stopPcmCapture();
     stopPcmPlayer();
     resetTransientState();
   }
@@ -562,7 +527,6 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         setFatalError(null);
         setRecoverableError(null);
         startFrameLoop();
-        syncPcmCapture();
         void ensurePcmPlayer().resume();
         break;
       case "response.chunk": {
@@ -748,7 +712,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     applyVideoSource("none");
   }
 
-  async function enableCamera() {
+  async function enableCamera(deviceId: string) {
     const requestId = cameraRequestIdRef.current + 1;
     cameraRequestIdRef.current = requestId;
     fileRequestIdRef.current += 1;
@@ -760,17 +724,16 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setCameraError(null);
     setCameraView("permission");
     try {
-      if (!window.isSecureContext) {
-        throw new DOMException("Camera access requires a secure browser context", "SecurityError");
-      }
+      assertSecureMediaContext("camera");
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: CAMERA_VIDEO_CONSTRAINTS,
+        video: cameraConstraints(deviceId),
       });
       if (requestId !== cameraRequestIdRef.current) {
         stopMediaStream(stream);
         return;
       }
+      devices.refresh();
       setCameraView("connecting");
       videoStreamRef.current = stream;
       setPreviewStream(stream);
@@ -809,30 +772,52 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
   }
 
-  function toggleCamera() {
+  function enableVideoInput() {
+    switch (videoInput.kind) {
+      case "camera":
+        void enableCamera(videoInput.deviceId);
+        return;
+      case "library":
+        if (lastLibraryVideo) {
+          void selectVideo(lastLibraryVideo);
+        }
+        return;
+      default: {
+        const exhaustive: never = videoInput;
+        return exhaustive;
+      }
+    }
+  }
+
+  function toggleVideo() {
     switch (videoSourceRef.current) {
       case "file":
-        void enableCamera();
+        clearVideo();
         return;
       case "camera":
         if (sourceLiveRef.current || cameraInFlightRef.current) {
           disableCamera();
           return;
         }
-        void enableCamera();
+        enableVideoInput();
         return;
       case "none":
         if (cameraInFlightRef.current) {
           disableCamera();
           return;
         }
-        void enableCamera();
+        enableVideoInput();
         return;
       default: {
         const exhaustive: never = videoSourceRef.current;
         return exhaustive;
       }
     }
+  }
+
+  function selectCamera(deviceId: string) {
+    setVideoInput({ kind: "camera", deviceId });
+    void enableCamera(deviceId);
   }
 
   async function attachVideoFile(url: string, requestId: number): Promise<void> {
@@ -852,7 +837,6 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (element.srcObject) {
       element.srcObject = null;
     }
-    element.loop = true;
     element.muted = true;
     element.playsInline = true;
     if (element.src !== url) {
@@ -869,7 +853,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     void element.play().catch(() => undefined);
   }
 
-  async function selectVideoFile(file: File) {
+  async function selectVideo(video: VideoRecord) {
     const requestId = fileRequestIdRef.current + 1;
     fileRequestIdRef.current = requestId;
     cameraRequestIdRef.current += 1;
@@ -877,20 +861,27 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     sourceLiveRef.current = false;
     stopCameraPreview();
     detachFileFromVideo();
-    revokeFileUrl();
+    releasePlayback();
 
     setCameraOn(false);
     setCameraError(null);
+    releaseVideoAudio();
     applyVideoSource("file");
-    setVideoFileName(file.name);
+    setActiveVideo(video);
+    setLastLibraryVideo(video);
+    setVideoInput({ kind: "library" });
+    setVideoFileUrl(null);
     setCameraView("connecting");
 
-    const url = URL.createObjectURL(file);
-    fileUrlRef.current = url;
-    setVideoFileUrl(url);
-
     try {
-      await attachVideoFile(url, requestId);
+      const playback = await getVideoLibrary().open(video);
+      if (requestId !== fileRequestIdRef.current) {
+        playback.release();
+        return;
+      }
+      playbackRef.current = playback;
+      setVideoFileUrl(playback.url);
+      await attachVideoFile(playback.url, requestId);
     } catch (error) {
       if (requestId !== fileRequestIdRef.current) {
         return;
@@ -905,6 +896,9 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       return;
     }
 
+    if (videoRef.current) {
+      attachVideoAudio(videoRef.current);
+    }
     sourceLiveRef.current = true;
     setCameraView("live");
     if (liveRef.current) {
@@ -914,8 +908,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
   }
 
-  function clearVideoFile() {
-    if (videoSourceRef.current !== "file" && !fileUrlRef.current) {
+  function clearVideo() {
+    if (videoSourceRef.current !== "file" && !playbackRef.current) {
       return;
     }
     fileRequestIdRef.current += 1;
@@ -934,59 +928,6 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     sourceLiveRef.current = false;
     setCameraError(videoFileErrorMessage());
     setCameraView("error");
-  }
-
-  function disableMicrophone() {
-    micRequestIdRef.current += 1;
-    micInFlightRef.current = false;
-    stopMicrophoneTracks();
-    setMicOn(false);
-    setMicError(null);
-  }
-
-  async function enableMicrophone() {
-    const requestId = micRequestIdRef.current + 1;
-    micRequestIdRef.current = requestId;
-    micInFlightRef.current = true;
-    setMicError(null);
-    try {
-      if (!window.isSecureContext) {
-        throw new DOMException("Microphone access requires a secure browser context", "SecurityError");
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: { ideal: 1 },
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-        video: false,
-      });
-      if (requestId !== micRequestIdRef.current) {
-        stopMediaStream(stream);
-        return;
-      }
-      audioStreamRef.current = stream;
-      micInFlightRef.current = false;
-      setMicOn(true);
-      syncPcmCapture();
-      void pcmPlayerRef.current?.resume();
-    } catch (error) {
-      if (requestId !== micRequestIdRef.current) {
-        return;
-      }
-      micInFlightRef.current = false;
-      stopMicrophoneTracks();
-      setMicOn(false);
-      setMicError(mediaDeviceErrorMessage(error, "microphone"));
-    }
-  }
-
-  function toggleMicrophone() {
-    if (audioStreamRef.current || micInFlightRef.current) {
-      disableMicrophone();
-      return;
-    }
-    void enableMicrophone();
   }
 
   async function start() {
@@ -1022,7 +963,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
 
     stopPcmPlayer();
-    const player = new PcmPlayer();
+    const player = createPcmPlayer();
     pcmPlayerRef.current = player;
     void player.resume();
 
@@ -1090,7 +1031,6 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setFatalError(null);
     stopFrameTimer();
     liveRef.current = false;
-    stopPcmCapture();
     stopPcmPlayer();
 
     const socket = socketRef.current;
@@ -1205,16 +1145,18 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       generationRef.current += 1;
       cameraRequestIdRef.current += 1;
       fileRequestIdRef.current += 1;
-      micRequestIdRef.current += 1;
       endingRef.current?.reject(new Error("unmounted"));
       cleanupSession();
       stopVideoPreview();
       clearFileSourceState();
-      stopMicrophoneTracks();
     };
     // Session and media resources are stored in refs and must be released on unmount.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount cleanup only
   }, []);
+
+  useEffect(() => {
+    void pcmPlayerRef.current?.setOutputDevice(outputDeviceId).catch(() => undefined);
+  }, [outputDeviceId]);
 
   const sessionActive = phase !== "idle";
 
@@ -1236,10 +1178,18 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     videoSource,
     previewStream,
     videoFileUrl,
-    videoFileName,
+    activeVideo,
+    lastLibraryVideo,
+    videoInput,
     cameraOn,
-    micOn,
-    micError,
+    audio: {
+      ...audio,
+      toggle: () => {
+        void pcmPlayerRef.current?.resume();
+        audio.toggle();
+      },
+    },
+    devices,
     messages,
     debugEntries,
     isStreaming,
@@ -1284,12 +1234,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     start,
     stop,
     sendText,
-    toggleCamera,
-    toggleMicrophone,
-    selectVideoFile: (file: File) => {
-      void selectVideoFile(file);
+    toggleVideo,
+    selectCamera,
+    selectVideo: (video: VideoRecord) => {
+      void selectVideo(video);
     },
-    clearVideoFile,
+    clearVideo,
     reportVideoFileError,
   };
 }

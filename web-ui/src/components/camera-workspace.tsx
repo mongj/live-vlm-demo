@@ -1,30 +1,22 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { VideoPlaybackControls } from "@/components/video-playback-controls";
 import type { CameraViewState, VideoSourceKind } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
-import { MicIcon, MicOffIcon, UploadIcon, VideoIcon, VideoOffIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, type ChangeEvent, type Ref, type RefObject } from "react";
+import type { VideoRecord } from "@/lib/video-library/types";
+import { useEffect, useRef, type ReactNode, type Ref, type RefObject } from "react";
 
 type CameraWorkspaceProps = {
   videoRef: Ref<HTMLVideoElement | null>;
   previewStream: MediaStream | null;
   videoFileUrl: string | null;
-  videoFileName: string | null;
+  activeVideo: VideoRecord | null;
   videoSource: VideoSourceKind;
   cameraView: CameraViewState;
   cameraError: string | null;
-  cameraOn: boolean;
-  micOn: boolean;
-  micError: string | null;
   sessionLive: boolean;
   stageClassName?: string;
-  onToggleCamera: () => void;
-  onToggleMicrophone: () => void;
-  onSelectVideoFile: (file: File) => void;
-  onClearVideoFile: () => void;
+  controlBar: ReactNode;
   onVideoFileError: () => void;
 };
 
@@ -51,7 +43,7 @@ function overlayCopy(
     case "empty":
       return {
         title: "No video source",
-        body: "Turn on the camera or upload a clip to preview the feed.",
+        body: "Turn on the camera or choose a video from the library to preview the feed.",
       };
     case "permission":
       return {
@@ -63,7 +55,7 @@ function overlayCopy(
         case "file":
           return {
             title: "Loading video",
-            body: "Preparing the uploaded clip.",
+            body: "Preparing the stored video.",
           };
         case "camera":
         case "none":
@@ -98,41 +90,6 @@ function overlayCopy(
       }
     default: {
       const exhaustive: never = view;
-      return exhaustive;
-    }
-  }
-}
-
-function isCameraEngaged(view: CameraViewState, cameraError: string | null): boolean {
-  switch (view) {
-    case "connecting":
-    case "live":
-      return true;
-    case "permission":
-      return cameraError === null;
-    case "empty":
-    case "error":
-      return false;
-    default: {
-      const exhaustive: never = view;
-      return exhaustive;
-    }
-  }
-}
-
-function isCameraButtonEngaged(
-  view: CameraViewState,
-  cameraError: string | null,
-  videoSource: VideoSourceKind
-): boolean {
-  switch (videoSource) {
-    case "file":
-      return false;
-    case "none":
-    case "camera":
-      return isCameraEngaged(view, cameraError);
-    default: {
-      const exhaustive: never = videoSource;
       return exhaustive;
     }
   }
@@ -212,7 +169,6 @@ function attachPreview(
       if (videoFileUrl && video.src !== videoFileUrl) {
         video.src = videoFileUrl;
       }
-      video.loop = true;
       video.muted = true;
       void video.play().catch(() => undefined);
       return;
@@ -233,43 +189,23 @@ function attachPreview(
   }
 }
 
-function fileControlLabel(fileActive: boolean, videoFileName: string | null): string {
-  if (!fileActive) {
-    return "Upload video";
-  }
-  return videoFileName ? `Clear video (${videoFileName})` : "Clear video";
-}
-
 export function CameraWorkspace({
   videoRef,
   previewStream,
   videoFileUrl,
-  videoFileName,
+  activeVideo,
   videoSource,
   cameraView,
   cameraError,
-  cameraOn,
-  micOn,
-  micError,
   sessionLive,
   stageClassName,
-  onToggleCamera,
-  onToggleMicrophone,
-  onSelectVideoFile,
-  onClearVideoFile,
+  controlBar,
   onVideoFileError,
 }: CameraWorkspaceProps) {
   const overlay = overlayCopy(cameraView, cameraError, videoSource);
   const showVideo = showCameraVideo(cameraView);
-  const cameraEngaged = isCameraButtonEngaged(cameraView, cameraError, videoSource);
-  const cameraPending = cameraEngaged && !cameraOn;
-  const cameraLabel = cameraEngaged ? "Turn camera off" : "Turn camera on";
-  const micLabel = micOn ? "Turn microphone off" : "Turn microphone on";
   const fileActive = isFileSourceActive(videoSource);
-  const filePending = fileActive && cameraView === "connecting";
-  const fileLabel = fileControlLabel(fileActive, videoFileName);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const video = localVideoRef.current;
@@ -279,38 +215,14 @@ export function CameraWorkspace({
     attachPreview(video, previewStream, videoFileUrl);
   }, [previewStream, videoFileUrl]);
 
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (file) {
-      onSelectVideoFile(file);
-    }
-  }
-
-  function handleFileControlClick() {
-    if (fileActive) {
-      onClearVideoFile();
-      return;
-    }
-    fileInputRef.current?.click();
-  }
-
-  function handleVideoEnded(event: { currentTarget: HTMLVideoElement }) {
-    const video = event.currentTarget;
-    video.currentTime = 0;
-    void video.play().catch(() => undefined);
-  }
-
   return (
     <main className="flex h-full min-h-0 min-w-0 flex-col bg-camera-stage">
       <div className={cn("@container flex min-h-0 flex-1", stageClassName ?? "p-6")}>
-        <div className="relative m-auto aspect-video w-[min(100%,calc(100cqh*16/9))] overflow-hidden rounded-lg bg-camera-preview">
+        <div className="group/stage relative m-auto aspect-video w-[min(100%,calc(100cqh*16/9))] overflow-hidden rounded-lg bg-camera-preview">
           <video
             autoPlay
             className={cn("absolute inset-0 size-full object-contain", !showVideo && "opacity-0")}
-            loop
             muted
-            onEnded={handleVideoEnded}
             onError={() => {
               const video = localVideoRef.current;
               if (!video || !videoFileUrl) {
@@ -328,9 +240,19 @@ export function CameraWorkspace({
             }}
           />
           {cameraView === "live" ? (
-            <div className="absolute top-3 left-3 z-10 flex items-center gap-2 rounded-full bg-background/80 px-2.5 py-1 text-xs">
-              <span className={cn("size-1.5 rounded-full", cameraStatusDotClass(sessionLive))} />
-              {cameraStatusLabel(sessionLive)}
+            <div
+              className={cn(
+                "pointer-events-none absolute top-3 left-3 z-10 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-full bg-background/80 px-2.5 py-1 text-xs opacity-0 transition-opacity duration-200 group-has-focus-visible/stage:opacity-100",
+                fileActive
+                  ? "group-has-[[data-slot=playback-overlay][data-visible=true]]/stage:opacity-100"
+                  : "group-hover/stage:opacity-100"
+              )}
+            >
+              <span className={cn("size-1.5 shrink-0 rounded-full", cameraStatusDotClass(sessionLive))} />
+              <span className="shrink-0">{cameraStatusLabel(sessionLive)}</span>
+              {fileActive && activeVideo ? (
+                <span className="truncate text-muted-foreground">{activeVideo.name}</span>
+              ) : null}
             </div>
           ) : null}
           {overlay ? (
@@ -341,82 +263,12 @@ export function CameraWorkspace({
               </div>
             </div>
           ) : null}
-          <div className="absolute inset-x-0 bottom-4 z-20 flex flex-col items-center gap-2">
-            {micError ? <p className="px-4 text-center text-xs text-destructive">{micError}</p> : null}
-            <div className="flex items-center gap-3">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    aria-label={cameraLabel}
-                    aria-pressed={cameraEngaged}
-                    className="size-12 rounded-full [&_svg:not([class*='size-'])]:size-5"
-                    onClick={onToggleCamera}
-                    size="icon"
-                    type="button"
-                    variant={cameraEngaged ? "secondary" : "destructive"}
-                  >
-                    {cameraPending ? (
-                      <Spinner className="size-5" />
-                    ) : cameraEngaged ? (
-                      <VideoIcon />
-                    ) : (
-                      <VideoOffIcon />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{cameraLabel}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    aria-label={micLabel}
-                    aria-pressed={micOn}
-                    className="size-12 rounded-full [&_svg:not([class*='size-'])]:size-5"
-                    onClick={onToggleMicrophone}
-                    size="icon"
-                    type="button"
-                    variant={micOn ? "secondary" : "destructive"}
-                  >
-                    {micOn ? <MicIcon /> : <MicOffIcon />}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{micLabel}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    aria-label={fileLabel}
-                    aria-pressed={fileActive}
-                    className="size-12 rounded-full [&_svg:not([class*='size-'])]:size-5"
-                    onClick={handleFileControlClick}
-                    size="icon"
-                    type="button"
-                    variant={fileActive ? "secondary" : "outline"}
-                  >
-                    {filePending ? (
-                      <Spinner className="size-5" />
-                    ) : fileActive ? (
-                      <XIcon />
-                    ) : (
-                      <UploadIcon />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{fileLabel}</TooltipContent>
-              </Tooltip>
-            </div>
-            <input
-              accept="video/*"
-              aria-hidden
-              className="hidden"
-              onChange={handleFileChange}
-              ref={fileInputRef}
-              tabIndex={-1}
-              type="file"
-            />
-          </div>
+          {fileActive && cameraView === "live" ? (
+            <VideoPlaybackControls key={videoFileUrl} videoRef={localVideoRef} />
+          ) : null}
         </div>
       </div>
+      {controlBar}
     </main>
   );
 }

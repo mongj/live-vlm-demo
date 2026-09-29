@@ -2,12 +2,14 @@
 
 import { CameraWorkspace } from "@/components/camera-workspace";
 import { DebugPanel } from "@/components/debug-panel";
+import { MediaControlBar } from "@/components/media-control-bar";
 import { MobilePlayground } from "@/components/mobile-playground";
 import { ModelSidebar } from "@/components/model-sidebar";
 import { TranscriptPanel } from "@/components/transcript-panel";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { useHydrated, useIsDesktop } from "@/hooks/use-media-query";
 import { usePlayground, type PlaygroundState } from "@/hooks/use-playground";
+import { useVideoLibrary } from "@/hooks/use-video-library";
 import type { CatalogModel } from "@/lib/catalog";
 import type { ReactNode } from "react";
 import { useState } from "react";
@@ -76,26 +78,27 @@ function DesktopPlayground({
 
 export function Playground({ initialModels, initialCatalogError }: PlaygroundProps) {
   const playground = usePlayground(initialModels, initialCatalogError);
+  const videoLibrary = useVideoLibrary();
   const [debugOpen, setDebugOpen] = useState(false);
   const hydrated = useHydrated();
   const isDesktop = useIsDesktop();
 
   const camera = (
     <CameraWorkspace
+      activeVideo={playground.activeVideo}
       cameraError={playground.cameraError}
-      cameraOn={playground.cameraOn}
       cameraView={playground.cameraView}
-      micError={playground.micError}
-      micOn={playground.micOn}
-      onClearVideoFile={playground.clearVideoFile}
-      onSelectVideoFile={playground.selectVideoFile}
-      onToggleCamera={playground.toggleCamera}
-      onToggleMicrophone={playground.toggleMicrophone}
+      controlBar={
+        <MediaControlBar
+          className={isDesktop ? "px-6 pb-6" : "px-3 pb-3"}
+          playground={playground}
+          videoLibrary={videoLibrary}
+        />
+      }
       onVideoFileError={playground.reportVideoFileError}
       previewStream={playground.previewStream}
       sessionLive={playground.phase === "live"}
       stageClassName={isDesktop ? undefined : "p-3"}
-      videoFileName={playground.videoFileName}
       videoFileUrl={playground.videoFileUrl}
       videoRef={playground.videoRef}
       videoSource={playground.videoSource}

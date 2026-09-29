@@ -1,3 +1,5 @@
+import { setContextSink } from "@/lib/media-devices";
+
 export const INBOUND_SAMPLE_RATE_HZ = 16_000;
 export const OUTBOUND_SAMPLE_RATE_HZ = 24_000;
 export const BYTES_PER_SAMPLE = 2;
@@ -6,20 +8,6 @@ export const CAPTURE_CHUNK_SECONDS = 0.1;
 export const BARGE_IN_RMS_THRESHOLD = 0.045;
 
 const BASE64_CHUNK = 0x2000;
-const SCRIPT_PROCESSOR_BUFFER = 4096;
-
-const CAPTURE_WORKLET = `
-class PcmCaptureProcessor extends AudioWorkletProcessor {
-  process(inputs) {
-    const samples = inputs[0] && inputs[0][0];
-    if (samples && samples.length > 0) {
-      this.port.postMessage(samples);
-    }
-    return true;
-  }
-}
-registerProcessor("pcm-capture", PcmCaptureProcessor);
-`;
 
 export function encodePcmBase64(pcm: Uint8Array): string {
   let binary = "";
@@ -105,19 +93,6 @@ function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
   return out;
 }
 
-function concatFloat(left: Float32Array, right: Float32Array): Float32Array {
-  if (left.length === 0) {
-    return right;
-  }
-  if (right.length === 0) {
-    return left;
-  }
-  const out = new Float32Array(left.length + right.length);
-  out.set(left);
-  out.set(right, left.length);
-  return out;
-}
-
 export class PcmPlayer {
   private readonly context: AudioContext;
   private nextTime = 0;
@@ -132,6 +107,10 @@ export class PcmPlayer {
     if (this.context.state === "suspended") {
       await this.context.resume();
     }
+  }
+
+  setOutputDevice(deviceId: string): Promise<void> {
+    return setContextSink(this.context, deviceId);
   }
 
   enqueue(pcmBase64: string): void {
@@ -189,122 +168,5 @@ export class PcmPlayer {
   close(): void {
     this.stop();
     void this.context.close();
-  }
-}
-
-export class PcmCapture {
-  private context: AudioContext | null = null;
-  private source: MediaStreamAudioSourceNode | null = null;
-  private node: AudioNode | null = null;
-  private mute: GainNode | null = null;
-  private workletUrl: string | null = null;
-  private pending: Float32Array = new Float32Array(0);
-  private closed = false;
-
-  constructor(
-    private readonly stream: MediaStream,
-    private readonly onChunk: (pcm: Uint8Array) => void,
-    private readonly onSpeechStart?: () => void
-  ) {}
-
-  async start(): Promise<void> {
-    const context = new AudioContext({ sampleRate: INBOUND_SAMPLE_RATE_HZ });
-    this.context = context;
-    await context.resume();
-    if (this.closed) {
-      await context.close();
-      return;
-    }
-    this.source = context.createMediaStreamSource(this.stream);
-    try {
-      await this.startWorklet(context);
-    } catch {
-      this.startScriptProcessor(context);
-    }
-  }
-
-  stop(): void {
-    this.closed = true;
-    this.pending = new Float32Array(0);
-    this.source?.disconnect();
-    this.node?.disconnect();
-    this.mute?.disconnect();
-    this.source = null;
-    this.node = null;
-    this.mute = null;
-    const context = this.context;
-    this.context = null;
-    if (context && context.state !== "closed") {
-      void context.close();
-    }
-    if (this.workletUrl) {
-      URL.revokeObjectURL(this.workletUrl);
-      this.workletUrl = null;
-    }
-  }
-
-  private async startWorklet(context: AudioContext): Promise<void> {
-    const blob = new Blob([CAPTURE_WORKLET], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob);
-    this.workletUrl = url;
-    await context.audioWorklet.addModule(url);
-    if (this.closed || !this.source) {
-      throw new Error("Capture closed");
-    }
-    const node = new AudioWorkletNode(context, "pcm-capture");
-    node.port.onmessage = (event) => {
-      if (event.data instanceof Float32Array) {
-        this.handleSamples(event.data);
-      }
-    };
-    this.connectGraph(context, node);
-  }
-
-  private startScriptProcessor(context: AudioContext): void {
-    if (!this.source) {
-      return;
-    }
-    const processor = context.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
-    processor.onaudioprocess = (event) => {
-      this.handleSamples(event.inputBuffer.getChannelData(0));
-    };
-    this.connectGraph(context, processor);
-  }
-
-  private connectGraph(context: AudioContext, node: AudioNode): void {
-    if (!this.source) {
-      return;
-    }
-    const mute = context.createGain();
-    mute.gain.value = 0;
-    this.source.connect(node);
-    node.connect(mute);
-    mute.connect(context.destination);
-    this.node = node;
-    this.mute = mute;
-  }
-
-  private handleSamples(samples: Float32Array): void {
-    if (this.closed || samples.length === 0) {
-      return;
-    }
-    const context = this.context;
-    if (!context) {
-      return;
-    }
-    if (this.onSpeechStart && floatRms(samples) >= BARGE_IN_RMS_THRESHOLD) {
-      this.onSpeechStart();
-    }
-    this.pending = concatFloat(this.pending, samples);
-    const needed = Math.max(1, Math.round(context.sampleRate * CAPTURE_CHUNK_SECONDS));
-    while (this.pending.length >= needed) {
-      const slice = this.pending.subarray(0, needed);
-      this.pending = this.pending.slice(needed);
-      const resampled = resampleLinear(slice, context.sampleRate, INBOUND_SAMPLE_RATE_HZ);
-      const pcm = floatToS16le(resampled);
-      if (pcm.byteLength >= BYTES_PER_SAMPLE) {
-        this.onChunk(pcm);
-      }
-    }
   }
 }
