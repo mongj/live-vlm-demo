@@ -88,6 +88,19 @@ export function getCatalogUrl(gatewayAddress?: string): string {
   return `/api/catalog?origin=${encodeURIComponent(origin)}`;
 }
 
+/**
+ * Same-origin through the Next.js `/v1` rewrite: the gateway sends no CORS headers, so a custom
+ * Server Address is not used for video library requests.
+ */
+export function getVideosUrl(libraryKey: string, name?: string): string {
+  const path = name === undefined ? "/v1/videos" : `/v1/videos/${encodeURIComponent(name)}`;
+  return `${path}?${new URLSearchParams({ key: libraryKey })}`;
+}
+
+export function getVideoThumbnailUrl(libraryKey: string, name: string): string {
+  return `/v1/videos/${encodeURIComponent(name)}/thumbnail?${new URLSearchParams({ key: libraryKey })}`;
+}
+
 export function getRealtimeUrl(gatewayAddress?: string): string {
   const origin = parseGatewayAddress(gatewayAddress ?? DEFAULT_GATEWAY_ADDRESS);
   const url = new URL("/v1/realtime", origin);
