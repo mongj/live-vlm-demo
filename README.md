@@ -31,7 +31,7 @@ Start the gateway:
 make server
 ```
 
-Start the frontend:
+Start the frontend. This builds the production bundle, then serves it:
 
 ```bash
 make client
@@ -42,7 +42,7 @@ named `live-vlm-server` and `live-vlm-client` and print attach and delete comman
 Output stays visible when attached and is saved to `logs/server.screen.log` and
 `logs/client.screen.log`. Detach with Ctrl+A, then D. Sessions survive logout.
 Repeated commands reuse the existing session; delete it first to apply changed
-settings. No manual Conda activation is needed. Override the
+settings or to rebuild. No manual Conda activation is needed. Override the
 frontend port with `make client CLIENT_PORT=3002`, or the gateway port with
 `LIVE_VLM_PORT=9001 make server` (also update `VLM_GATEWAY_URL` for the frontend).
 
@@ -60,14 +60,17 @@ ssh -N -L 3001:127.0.0.1:3001 YOUR_HOST
 
 Then open `http://localhost:3001`. To change the gateway destination, set
 `VLM_GATEWAY_URL` in `web-ui/.env.local` (default `http://127.0.0.1:8787`), then
-restart development or rebuild production.
+delete the client screen and run `make client` again so the production build
+picks up the new value.
 
 ### JoyAI on a PBS compute node
 
-Run `make joyai` on the login/gateway host (`caquelon`). It selects an available
-supported node, asks for confirmation, submits the PBS job, and returns with the
-job ID and commands to start and stop the tunnel. The job may still be queued;
-submission does not mean the model servers are ready.
+Run `make joyai` on the login/gateway host (`caquelon`). It selects the first
+supported node with enough free GPUs and RAM whose JoyAI startup files are
+present, asks for confirmation, submits the PBS job, and returns with the job ID
+and commands to start and stop the tunnel. Nodes that fail that file check are
+skipped. The job may still be queued; submission does not mean the model servers
+are ready.
 
 Run the printed tunnel command on the same login/gateway host. For example,
 if the selected node is `cvml01`:
@@ -84,17 +87,17 @@ screen -S live-vlm-joyai-tunnel -X quit
 
 The tunnel and PBS job are independent. Closing the tunnel leaves the job running;
 stop the job with `qdel JOB_ID`, using the ID printed by `make joyai`. PBS also
-stops it at its walltime limit (default one hour, configurable with
+stops it at its walltime limit (default four hours, configurable with
 `make joyai JOYAI_WALLTIME=02:00:00`). Each confirmed `make joyai` invocation
 submits a new job. Stop an existing tunnel before starting a replacement.
 
 Check the job with `qstat JOB_ID` and watch startup logs with:
 
 ```bash
-tail -n 50 -F joyai/logs/webinfer.log
+tail -n 50 -F joyai/logs/joyai_web.run.log joyai/logs/webinfer.log
 ```
 
-`make joyai` requires `pbsnodes`, `qsub`, and `jq`. Starting the tunnel requires
+`make joyai` requires `pbsnodes`, `qsub`, `jq`, `ssh`, and `timeout`. Starting the tunnel requires
 `screen`, `ssh`, and SSH key access to the selected compute node. The gateway
 catalog keeps `base_url = "http://127.0.0.1:8070/v1"`. The Mac still forwards only
 the frontend port.

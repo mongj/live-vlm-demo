@@ -13,13 +13,21 @@ JOYAI_WEBUI_ROOT="${JOYAI_WEBUI_ROOT:-/home/mingjun/live-vlm-demo/joyai/webui}"
 JOYAI_ENV="${JOYAI_ENV:-/home/mingjun/.conda/envs/joyai-py312-cu129}"
 MODEL_ROOT="${MODEL_ROOT:-/mnt/rdata7/proactive/checkpoints}"
 LOG_DIR="${LOG_DIR:-/home/mingjun/live-vlm-demo/joyai/logs}"
-mkdir -p "$LOG_DIR"
+CHECK_ONLY=false
+case "${1:-}" in
+  --check) CHECK_ONLY=true ;;
+  "") ;;
+  *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+esac
+if [[ "$CHECK_ONLY" != true ]]; then
+  mkdir -p "$LOG_DIR"
 
-# PBS -o staging often never arrives on this cluster. Mirror everything to NFS.
-exec > >(tee -a "$LOG_DIR/joyai_web.run.log") 2>&1
+  # PBS -o staging often never arrives on this cluster. Mirror everything to NFS.
+  exec > >(tee -a "$LOG_DIR/joyai_web.run.log") 2>&1
 
-echo "===== joyai_web start ====="
-echo "date=$(date --iso-8601=seconds) job=${PBS_JOBID:-local} host=$(hostname)"
+  echo "===== joyai_web start ====="
+  echo "date=$(date --iso-8601=seconds) job=${PBS_JOBID:-local} host=$(hostname)"
+fi
 
 for required in \
   "$JOYAI_ROOT/services/webinfer/scripts/run.sh" \
@@ -29,12 +37,15 @@ for required in \
   "$MODEL_ROOT/Qwen3-VL-4B-Instruct"
 do
   if [[ ! -e "$required" ]]; then
-    echo "$(date --iso-8601=seconds) ${PBS_JOBID:-local} $(hostname): missing $required" \
-      >> "$LOG_DIR/joyai_pbs_failures.log"
-    echo "missing $required on $(hostname); is /mnt/rdata7 mounted?" >&2
+    if [[ "$CHECK_ONLY" != true ]]; then
+      echo "$(date --iso-8601=seconds) ${PBS_JOBID:-local} $(hostname): missing $required" \
+        >> "$LOG_DIR/joyai_pbs_failures.log"
+    fi
+    echo "missing $required on $(hostname); check the path and its filesystem mount" >&2
     exit 1
   fi
 done
+[[ "$CHECK_ONLY" != true ]] || exit 0
 
 # Use the installed environment directly; Conda itself need not exist on the node.
 export PATH="$JOYAI_ENV/bin:$PATH"
