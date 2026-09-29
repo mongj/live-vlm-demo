@@ -9,6 +9,12 @@ from fastapi import FastAPI, HTTPException, WebSocket
 
 from .catalog import CatalogError, load_catalog
 from .session import run_session
+from .thumbnails import (
+    ThumbnailCache,
+    resolve_thumbnail_cache_dir,
+    resolve_thumbnail_concurrency,
+)
+from .videos import mount_video_routes, resolve_video_roots
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -59,8 +65,17 @@ def resolve_runtime_settings(
     return host, port, config_path
 
 
-def create_app(config_path: str | Path) -> FastAPI:
+def create_app(
+    config_path: str | Path,
+    video_roots: Mapping[str, Path] | None = None,
+    thumbnail_cache: Path | None = None,
+) -> FastAPI:
     catalog = load_catalog(Path(config_path))
+    roots = resolve_video_roots(overrides=video_roots)
+    thumbnails = ThumbnailCache(
+        thumbnail_cache or resolve_thumbnail_cache_dir(),
+        concurrency=resolve_thumbnail_concurrency(),
+    )
     app = FastAPI(title="Live VLM Gateway")
 
     @app.get("/health")
@@ -77,6 +92,8 @@ def create_app(config_path: str | Path) -> FastAPI:
         if spec is None:
             raise HTTPException(status_code=404, detail="Model not found")
         return catalog.entry(spec)
+
+    mount_video_routes(app, roots, thumbnails)
 
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:

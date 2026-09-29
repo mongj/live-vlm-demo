@@ -29,6 +29,10 @@ Defaults:
 | `LIVE_VLM_CONFIG` | `./config.toml` | Catalog file, relative to the working directory |
 | `LIVE_VLM_HOST` | `127.0.0.1` | Bind host |
 | `LIVE_VLM_PORT` | `8787` | Bind port |
+| `LIVE_VLM_VIDEOS_SPOT_BENCH` | `/mnt/rdata7/mingjun/data/spot-bench` | Directory for the `spot-bench` video library |
+| `LIVE_VLM_VIDEOS_EGO_PROACTIVE` | `/mnt/rdata7/mingjun/data/ego-proactive` | Directory for the `ego-proactive` video library |
+| `LIVE_VLM_THUMBNAIL_CACHE` | `$XDG_CACHE_HOME/live-vlm/thumbnails` (else `~/.cache/live-vlm/thumbnails`) | Directory for generated video thumbnails and durations |
+| `LIVE_VLM_THUMBNAIL_CONCURRENCY` | `4` | Maximum ffmpeg thumbnail jobs at once |
 | `GEMINI_API_KEY` | unset | Required to start a Gemini Live Session. Loaded from the process environment or `web-server/.env`. |
 | `JOYAI_BASE_URL` | unset | Optional override of every JoyAI row's `base_url` in the catalog. Accepts `http(s)://host:port` or `.../v1`. |
 
@@ -43,9 +47,28 @@ LIVE_VLM_PORT=9001 python -m live_vlm_server
 | GET | `/health` | `{"ok": true}` — gateway process only |
 | GET | `/v1/models` | `{"models": [{id, label, config_schema}, ...]}` |
 | GET | `/v1/models/{id}` | One entry, or 404 |
+| GET | `/v1/videos?key=` | `{"videos": [{name, size, key, duration_ms}, ...]}` for `spot-bench` or `ego-proactive` |
+| GET | `/v1/videos/{name}?key=` | Stream one `.mp4` via `FileResponse`, or 404 |
+| GET | `/v1/videos/{name}/thumbnail?key=` | JPEG frame, at most 320 px wide; see below |
 | WS | `/v1/realtime` | Session protocol |
 
 Discovery reads the local Catalog and Config schemas. It does not construct adapters or touch the network.
+
+### Video thumbnails
+
+Thumbnails need `ffmpeg` and `ffprobe` on `PATH` (Homebrew on macOS, `/usr/bin` on the cluster). No Python package is required.
+
+The first request for a video probes its duration and grabs the frame at 10% of it, matching the browser's thumbnails for uploads. The JPEG and duration are written to `LIVE_VLM_THUMBNAIL_CACHE`, keyed by library key, file name, size and mtime. Later requests are served from disk, and replacing a video regenerates its thumbnail. At most `LIVE_VLM_THUMBNAIL_CONCURRENCY` ffmpeg jobs run at once, and concurrent requests for the same video share one job.
+
+Responses carry `ETag`, `Cache-Control: public, max-age=86400` and `X-Video-Duration-Ms`, and answer `If-None-Match` with 304. The listing never decodes video: `duration_ms` is `null` until that video's thumbnail has been generated once.
+
+| Status | Meaning |
+| --- | --- |
+| 400 / 404 | Same key and name validation as the file route |
+| 422 | The file could not be decoded; cached until the file changes |
+| 503 | `ffmpeg` or `ffprobe` is not installed |
+| 504 | ffmpeg timed out reading the file; nothing is cached |
+| 499 | The client disconnected while queued, so generation was skipped (appears in logs only) |
 
 ## Tests and type checks
 
