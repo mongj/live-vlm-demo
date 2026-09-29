@@ -31,7 +31,8 @@ Start the gateway:
 make server
 ```
 
-Start the frontend. This builds the production bundle, then serves it:
+Start the frontend. This syncs dependencies from the lockfile, builds the
+production bundle, then serves it:
 
 ```bash
 make client

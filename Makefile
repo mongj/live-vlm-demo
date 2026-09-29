@@ -169,7 +169,7 @@ server:
 	@bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-server "$(CURDIR)/web-server" "$(CURDIR)/logs/server.screen.log" "$(CONDA)" run --no-capture-output -n $(INSTALL_ENV) python -m live_vlm_server
 
 client:
-	@bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-client "$(CURDIR)/web-ui" "$(CURDIR)/logs/client.screen.log" "$(CONDA)" run --no-capture-output -n $(INSTALL_ENV) bash -c 'yarn build && exec yarn start --hostname "$$1" --port "$$2"' -- "$(CLIENT_HOST)" "$(CLIENT_PORT)"
+	@bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-client "$(CURDIR)/web-ui" "$(CURDIR)/logs/client.screen.log" "$(CONDA)" run --no-capture-output -n $(INSTALL_ENV) bash -c 'yarn install --immutable && yarn build && exec yarn start --hostname "$$1" --port "$$2"' -- "$(CLIENT_HOST)" "$(CLIENT_PORT)"
 
 down:
 	screen -S live-vlm-server -X quit
