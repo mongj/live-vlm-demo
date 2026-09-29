@@ -12,6 +12,7 @@ help:
 		'  install            Create/reuse Conda environment and install dependencies' \
 		'  server             Start gateway in screen live-vlm-server (port 8787)' \
 		'  client             Start frontend in screen live-vlm-client (port 3001)' \
+		'  down               Stop gateway and frontend' \
 		'  joyai              Submit PBS job and print manual tunnel commands'
 
 CONDA ?= conda
@@ -128,3 +129,7 @@ server:
 
 client:
 	@bash "$(CURDIR)/scripts/start-screen.sh" live-vlm-client "$(CURDIR)/web-ui" "$(CURDIR)/logs/client.screen.log" "$(CONDA)" run --no-capture-output -n $(INSTALL_ENV) yarn dev --hostname "$(CLIENT_HOST)" --port "$(CLIENT_PORT)"
+
+down:
+	screen -S live-vlm-server -X quit
+	screen -S live-vlm-client -X quit
