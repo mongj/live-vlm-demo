@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from live_vlm_server.adapters.gemini import GeminiAdapter, GeminiConfig
 from live_vlm_server.adapters.joyai import JoyAIAdapter, JoyAIConfig
 from live_vlm_server.adapters.mock import MockAdapter, MockConfig
+from live_vlm_server.adapters.minicpm import MiniCPMAdapter, MiniCPMConfig
 from live_vlm_server.main import create_app, load_dotenv_file, resolve_runtime_settings
 
 SHIPPED = Path(__file__).resolve().parents[1] / "config.toml"
@@ -23,7 +24,7 @@ def test_health_and_catalog_payload_shape() -> None:
         body = listing.json()
         assert list(body) == ["models"]
         ids = [entry["id"] for entry in body["models"]]
-        assert ids == ["joyai-vl", "gemini-3-8-live", "mock"]
+        assert ids == ["joyai-vl", "gemini-3-8-live", "minicpm-o-4-5", "mock"]
         for entry in body["models"]:
             assert set(entry) == {"id", "label", "config_schema"}
         mock = client.get("/v1/models/mock")
@@ -38,6 +39,10 @@ def test_health_and_catalog_payload_shape() -> None:
         assert gemini.status_code == 200
         assert gemini.json()["label"] == "Gemini 3.8 Live"
         assert gemini.json()["config_schema"] == GeminiConfig.model_json_schema()
+        minicpm = client.get("/v1/models/minicpm-o-4-5")
+        assert minicpm.status_code == 200
+        assert minicpm.json()["label"] == "MiniCPM-o 4.5 (Live video)"
+        assert minicpm.json()["config_schema"] == MiniCPMConfig.model_json_schema()
         missing = client.get("/v1/models/nope")
         assert missing.status_code == 404
 
@@ -47,6 +52,7 @@ def test_discovery_does_not_construct_adapters(monkeypatch: pytest.MonkeyPatch) 
     mock_init = MockAdapter.__init__
     joyai_init = JoyAIAdapter.__init__
     gemini_init = GeminiAdapter.__init__
+    minicpm_init = MiniCPMAdapter.__init__
 
     def tracking_mock(self: MockAdapter, spec: object, raw_config: object) -> None:
         constructed.append("mock")
@@ -60,15 +66,21 @@ def test_discovery_does_not_construct_adapters(monkeypatch: pytest.MonkeyPatch) 
         constructed.append("gemini")
         gemini_init(self, spec, raw_config, **kwargs)
 
+    def tracking_minicpm(self: MiniCPMAdapter, spec: object, raw_config: object) -> None:
+        constructed.append("minicpm")
+        minicpm_init(self, spec, raw_config)
+
     monkeypatch.setattr(MockAdapter, "__init__", tracking_mock)
     monkeypatch.setattr(JoyAIAdapter, "__init__", tracking_joyai)
     monkeypatch.setattr(GeminiAdapter, "__init__", tracking_gemini)
+    monkeypatch.setattr(MiniCPMAdapter, "__init__", tracking_minicpm)
     with TestClient(create_app(SHIPPED)) as client:
         client.get("/health")
         client.get("/v1/models")
         client.get("/v1/models/mock")
         client.get("/v1/models/joyai-vl")
         client.get("/v1/models/gemini-3-8-live")
+        client.get("/v1/models/minicpm-o-4-5")
     assert constructed == []
 
 

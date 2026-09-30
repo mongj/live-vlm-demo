@@ -10,6 +10,12 @@ adapter = "gemini"
 label = "Gemini 3.8 Live"
 
 [[models]]
+id = "minicpm-o-4-5"
+adapter = "minicpm"
+label = "MiniCPM-o 4.5 (Live video)"
+base_url = "ws://127.0.0.1:18006/v1/realtime?mode=video"
+
+[[models]]
 id = "mock"
 adapter = "mock"
 label = "Mock"

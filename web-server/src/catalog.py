@@ -15,7 +15,8 @@ from .adapters.base import Adapter
 from .adapters.gemini import GeminiAdapter
 from .adapters.joyai import JoyAIAdapter
 from .adapters.mock import MockAdapter
-from .types import ModelSpec
+from .adapters.minicpm import MiniCPMAdapter, validate_video_url
+from .types import ModelSpec, SessionError
 
 MODEL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_MODEL_ID_LEN = 64
@@ -25,6 +26,7 @@ ADAPTER_REGISTRY: dict[str, type[Adapter[Any]]] = {
     "gemini": GeminiAdapter,
     "joyai": JoyAIAdapter,
     "mock": MockAdapter,
+    "minicpm": MiniCPMAdapter,
 }
 
 
@@ -109,6 +111,11 @@ def _parse_row(row: Mapping[str, Any], seen_ids: set[str]) -> ModelSpec:
         if not isinstance(raw_base_url, str) or not raw_base_url:
             raise CatalogError("JoyAI models require base_url")
         base_url = normalize_joyai_base_url(raw_base_url)
+    elif adapter == "minicpm":
+        try:
+            base_url = validate_video_url(raw_base_url if isinstance(raw_base_url, str) else None)
+        except SessionError as exc:
+            raise CatalogError(f"MiniCPM base_url is invalid: {exc.message}") from exc
     else:
         if raw_base_url is not None:
             raise CatalogError(f"Adapter {adapter} does not take base_url")

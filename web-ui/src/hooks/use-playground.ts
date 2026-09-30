@@ -20,6 +20,7 @@ import {
   mediaDeviceErrorMessage,
   stopMediaStream,
 } from "@/lib/media-devices";
+import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
 import { encodePcmBase64, PcmPlayer } from "@/lib/pcm";
 import {
   encodeClientMessage,
@@ -1100,6 +1101,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   async function sendText(text: string) {
     const trimmed = text.trim();
     if (!trimmed) {
+      return;
+    }
+    const inputPolicy = typedInputPolicy(selectedModelIdRef.current, liveRef.current);
+    if (!inputPolicy.enabled) {
+      setRecoverableError(inputPolicy.notice ?? "Start a Session before sending a message");
       return;
     }
     interruptPlayback();
