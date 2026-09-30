@@ -23,12 +23,14 @@ import { InputGroupAddon } from "@/components/ui/input-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { TranscriptMessage } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
+import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
 import { BugIcon, MessageSquareIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 export type TranscriptDensity = "comfortable" | "compact";
 
 type TranscriptPanelProps = {
+  modelId?: string;
   messages: TranscriptMessage[];
   isStreaming: boolean;
   sessionActive: boolean;
@@ -176,6 +178,7 @@ function ComposerSubmit({
 }
 
 export function TranscriptPanel({
+  modelId,
   messages,
   isStreaming,
   sessionActive,
@@ -186,10 +189,11 @@ export function TranscriptPanel({
   onSend,
 }: TranscriptPanelProps) {
   const debugLabel = debugOpen ? "Hide debug panel" : "Show debug panel";
+  const inputPolicy = typedInputPolicy(modelId, sessionActive);
 
   function handleSubmit(message: PromptInputMessage) {
     const text = message.text.trim();
-    if (!text) {
+    if (!text || !inputPolicy.enabled) {
       return;
     }
     void onSend(text);
@@ -197,17 +201,20 @@ export function TranscriptPanel({
 
   const composer = (
     <>
+      {inputPolicy.notice ? (
+        <p className="mb-2 text-xs text-muted-foreground" role="note">{inputPolicy.notice}</p>
+      ) : null}
       {recoverableError && sessionActive ? (
         <p className="mb-2 truncate text-xs text-destructive">{recoverableError}</p>
       ) : null}
       <PromptInput className={promptInputClass(density)} maxFiles={0} onSubmit={handleSubmit}>
         <PromptInputTextarea
           className={textareaClass(density)}
-          disabled={!sessionActive}
-          placeholder={sessionActive ? "Ask about what the video shows" : "Start a Session to send a message"}
+          disabled={!inputPolicy.enabled}
+          placeholder={inputPolicy.notice ? "Typed follow-ups unavailable in MiniCPM live video" : sessionActive ? "Ask about what the video shows" : "Start a Session to send a message"}
           rows={textareaRows(density)}
         />
-        <ComposerSubmit density={density} isStreaming={isStreaming} sessionActive={sessionActive} />
+        <ComposerSubmit density={density} isStreaming={isStreaming} sessionActive={inputPolicy.enabled} />
       </PromptInput>
     </>
   );
@@ -239,7 +246,7 @@ export function TranscriptPanel({
               className={emptyStateClass(density)}
               description={
                 sessionActive
-                  ? "Speak or send a message"
+                  ? inputPolicy.notice ? "Watching the video feed for a response" : "Speak or send a message"
                   : "Start a session to see the live transcript."
               }
               icon={emptyStateIcon(density)}

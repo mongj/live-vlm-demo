@@ -111,6 +111,7 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       density={isDesktop ? "comfortable" : "compact"}
       isStreaming={playground.isStreaming}
       messages={playground.messages}
+      modelId={playground.selectedModelId}
       onSend={playground.sendText}
       onToggleDebug={() => setDebugOpen((open) => !open)}
       recoverableError={playground.recoverableError}
