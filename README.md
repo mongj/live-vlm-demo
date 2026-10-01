@@ -104,71 +104,28 @@ the frontend port.
 
 ### MiniCPM-o 4.5 live video (experimental)
 
-This app supplies the adapter, not the GPU model server. `make install`,
-`make server` and `make client` do **not** start MiniCPM; there is no
-`make minicpm` target.
-
-1. **Prepare the model runtime separately.** Follow the pinned
+1. Start a separate GPU runtime using the
    [MiniCPM-o-Demo setup guide](https://github.com/OpenBMB/MiniCPM-o-Demo/tree/47709a9210dfd71afa76c058e017fc8c4db5c8d2#quick-start).
-   Its PyTorch setup requires Linux and an NVIDIA GPU with more than 28 GB VRAM.
-   On a cluster, use your own scheduler allocation, never a login-node GPU or
-   another user's allocation. Start its gateway, worker and backend; wait for
-   model loading and worker readiness before starting an app session.
-2. **Protect the runtime before use.** Disable upstream recording in the effective
-   configuration (`"recording": {"enabled": false}`), and block recording-upload
-   and debug-trace routes. For Docker, verify the configuration is mounted and
-   applied; editing a host `config.json` alone does not configure the containers.
-   Expose only the video WebSocket and necessary health endpoints. Internal
-   services lack per-user authentication, so loopback alone does not isolate
-   users on a shared machine. Use nonsensitive test clips only until appropriate
-   authentication/isolation is in place; the app does not provide these protections.
-3. **Connect the app gateway to the protected video endpoint.** The existing entry
-   in `web-server/config.toml` is:
-
-   ```toml
-   [[models]]
-   id = "minicpm-o-4-5"
-   adapter = "minicpm"
-   label = "MiniCPM-o 4.5 (Live video)"
-   base_url = "ws://127.0.0.1:18006/v1/realtime?mode=video"
-   ```
-
-   For a remote runtime, run the tunnel on the machine running this app's
-   **FastAPI gateway**, not necessarily your laptop. This example assumes the
-   protected endpoint is configured on remote loopback port 18006:
+   The app's `make` commands do not start the model.
+2. Set the MiniCPM `base_url` in `web-server/config.toml` to the runtime's
+   `/v1/realtime?mode=video` WebSocket endpoint. The default is
+   `ws://127.0.0.1:18006/v1/realtime?mode=video`.
+   For a remote runtime, run this on the **app gateway host**, replacing the host
+   and remote port to match your allocated runtime:
 
    ```bash
-   ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18006:127.0.0.1:18006 YOUR_ALLOCATED_GPU_HOST
+   ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18006:127.0.0.1:REMOTE_PORT YOUR_GPU_HOST
    ```
 
-   Replace the host and remote port as appropriate; add your approved SSH jump
-   configuration if needed. Keep the tunnel open. Port 18006 is the app's example
-   endpoint, not a guarantee of upstream defaults. Keep the catalog ID unchanged:
-   the UI uses it to disable unsupported typed follow-ups.
-4. **Start the app** with `make install`, `make server` and `make client` from
-   the repository root (see the restart instructions above for existing sessions).
-   Open the frontend, select **MiniCPM-o 4.5 (Live video)**, and set **System prompt**
-   before **Start Session**. Use the video library to select a short nonsensitive
-   clip and start playback. Text and generated speech appear when the model
-   responds; silent video input does not guarantee an immediate answer.
-5. **Stop Session** when finished. Close your tunnel and release your own GPU job
-   separately; stopping the browser session does not shut down the model server.
+3. Start the app as above, select **MiniCPM-o 4.5 (Live video)**, set the system
+   prompt, choose a video and click **Start Session**.
+4. Click **Stop Session** when finished; close the tunnel and stop your GPU job
+   separately.
 
-**Limits and troubleshooting:** typed follow-ups and natural-language
-pause/repeat/step controls are not supported by this integration. With no audio
-input, the adapter supplies silence. Sessions last at most five minutes; start a
-new session after the limit. Connection-refused/startup-timeout errors mean you
-should check the endpoint, tunnel, loaded model and idle worker. A visible catalog
-entry alone does not prove the GPU runtime is ready. Treat `input_overload` or
-keepalive failures as failed runs; reduce the test scope or use a faster allocated
-GPU rather than disabling timeouts.
-
-Short-clip smoke tests produced image-grounded text and non-silent audio, but a
-184-second stream exceeded the tested GPU's processing capacity. These are not
-benchmark scores or proof of sustained real-time performance, speech quality or
-procedure guidance. The test runtime included local bounded-ingress/cleanup
-repairs not shipped in this app or the pinned upstream release; keep testing
-single-session. Publishing this adapter does not deploy that runtime.
+Use nonsensitive clips, disable upstream recording and restrict runtime access.
+Experimental: use short clips; sustained real-time performance is not validated.
+Sessions are limited to five minutes. Typed follow-ups and pause/repeat voice
+commands are not supported.
 
 ## Docker (off-cluster)
 
