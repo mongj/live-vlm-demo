@@ -21,6 +21,7 @@ import {
   stopMediaStream,
 } from "@/lib/media-devices";
 import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
+import { updateGuidance, type GuidanceState } from "@/lib/assistant-guidance.mjs";
 import { encodePcmBase64, PcmPlayer } from "@/lib/pcm";
 import {
   encodeClientMessage,
@@ -80,6 +81,8 @@ export type PlaygroundState = {
   audio: AudioInputsState;
   devices: MediaDevicesState;
   messages: TranscriptMessage[];
+  guidance: GuidanceState | null;
+  sessionNotice: string | null;
   debugEntries: DebugRawEntry[];
   isStreaming: boolean;
   sessionActive: boolean;
@@ -176,6 +179,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [videoAudioStream, setVideoAudioStream] = useState<MediaStream | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
+  const [guidance, setGuidance] = useState<GuidanceState | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [debugEntries, setDebugEntries] = useState<DebugRawEntry[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
 
@@ -355,6 +360,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
   function interruptPlayback() {
     const hadOpenTurn = assistantTurnOpenRef.current;
+    setGuidance((current) => updateGuidance(current, { interrupted: true, final: !hadOpenTurn }));
     pcmPlayerRef.current?.stop();
     if (hadOpenTurn) {
       discardReplyAudioRef.current = true;
@@ -412,6 +418,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setSessionId(null);
     setPhase("idle");
     setMessages([]);
+    setGuidance(null);
     setDebugEntries([]);
   }
 
@@ -498,11 +505,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function handleServerPayload(raw: string) {
+    // React may apply guidance updates after a later chunk closes this turn.
+    const turnOpenOnReceipt = assistantTurnOpenRef.current;
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
       setRecoverableError("Received malformed JSON from the gateway");
+      setGuidance((current) => updateGuidance(current, { failed: true, turnOpen: turnOpenOnReceipt }));
       return;
     }
 
@@ -550,6 +560,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         if (presentableInput) {
           suppressInputBargeInRef.current = true;
         }
+        setGuidance((current) => updateGuidance(current, {
+          text: chunk,
+          final: message.final,
+          modelId: selectedModelIdRef.current,
+          interrupted: message.interrupted,
+        }));
         if (message.audio) {
           playReplyAudio(message.audio);
         }
@@ -687,6 +703,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         break;
       }
       case "error":
+        setGuidance((current) => updateGuidance(current, { failed: true, turnOpen: turnOpenOnReceipt }));
         if (message.fatal) {
           setFatalError(message.message);
           setRecoverableError(null);
@@ -703,7 +720,18 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
   }
 
+  // A session has no source identity in the protocol. Stop it on replacement so
+  // replies already in flight cannot be presented over a different video.
+  function invalidateSourceSession() {
+    setGuidance(null);
+    if (phase !== "idle") {
+      void endSession();
+      setSessionNotice("Video source changed. Start a new session to receive assistance for this source.");
+    }
+  }
+
   function disableCamera() {
+    invalidateSourceSession();
     cameraRequestIdRef.current += 1;
     cameraInFlightRef.current = false;
     stopVideoPreview();
@@ -714,6 +742,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   async function enableCamera(deviceId: string) {
+    invalidateSourceSession();
     const requestId = cameraRequestIdRef.current + 1;
     cameraRequestIdRef.current = requestId;
     fileRequestIdRef.current += 1;
@@ -855,6 +884,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   async function selectVideo(video: VideoRecord) {
+    invalidateSourceSession();
     const requestId = fileRequestIdRef.current + 1;
     fileRequestIdRef.current = requestId;
     cameraRequestIdRef.current += 1;
@@ -913,6 +943,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (videoSourceRef.current !== "file" && !playbackRef.current) {
       return;
     }
+    invalidateSourceSession();
     fileRequestIdRef.current += 1;
     sourceLiveRef.current = false;
     clearFileSourceState();
@@ -926,6 +957,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (videoSourceRef.current !== "file") {
       return;
     }
+    invalidateSourceSession();
     sourceLiveRef.current = false;
     setCameraError(videoFileErrorMessage());
     setCameraView("error");
@@ -941,6 +973,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setFatalError(null);
     setRecoverableError(null);
     setMessages([]);
+    setGuidance(null);
+    setSessionNotice(null);
     setDebugEntries([]);
     setIsStreaming(false);
     setPhase("connecting");
@@ -1028,6 +1062,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       return;
     }
     stoppingRef.current = true;
+    setGuidance(null);
     setRecoverableError(null);
     setFatalError(null);
     stopFrameTimer();
@@ -1197,6 +1232,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     },
     devices,
     messages,
+    guidance,
+    sessionNotice,
     debugEntries,
     isStreaming,
     sessionActive,

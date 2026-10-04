@@ -13,12 +13,42 @@ help:
 		'  server             Start gateway in screen live-vlm-server (port 8787)' \
 		'  client             Build and start production frontend in screen live-vlm-client (port 3001)' \
 		'  down               Stop gateway and frontend' \
-		'  joyai              Submit PBS job and print manual tunnel commands'
+		'  joyai              Submit PBS job and print manual tunnel commands' \
+		'  minicpm-prepare    Prepare an owned offline MiniCPM runtime (no install or GPU)' \
+		'  minicpm            Submit one provisioned, reviewed MiniCPM PBS runtime (45 minutes)' \
+		'  minicpm-status     Show tracked PBS state and manual loopback tunnel instructions' \
+		'  minicpm-stop       Request shutdown of the verified tracked own PBS job'
 
 CONDA ?= conda
 INSTALL_ENV := live-vlm-demo
 CLIENT_HOST ?= 127.0.0.1
 CLIENT_PORT ?= 3001
+
+MINICPM_PYTHON ?= python3
+MINICPM_NCPUS ?= 8
+MINICPM_MEM ?= 64gb
+MINICPM_WALLTIME ?= 00:45:00
+MINICPM_STATE_DIR ?= $(CURDIR)/.minicpm-state
+MINICPM_YES ?= 0
+# Pass site values as environment variables (README examples), not Make expressions.
+export MINICPM_PYTHON MINICPM_LAUNCHER MINICPM_MODEL_PATH MINICPM_NODE MINICPM_NCPUS MINICPM_MEM
+export MINICPM_WALLTIME MINICPM_STATE_DIR MINICPM_YES
+export MINICPM_SOURCE_ARCHIVE MINICPM_RUNTIME_ROOT MINICPM_RUNTIME_PYTHON
+
+.PHONY: minicpm-prepare minicpm minicpm-status minicpm-stop
+minicpm-prepare:
+	@"$$MINICPM_PYTHON" "$(CURDIR)/scripts/minicpm_runtime/prepare.py" prepare \
+		--archive "$$MINICPM_SOURCE_ARCHIVE" --root "$$MINICPM_RUNTIME_ROOT" \
+		--model "$$MINICPM_MODEL_PATH" --python "$$MINICPM_RUNTIME_PYTHON"
+
+minicpm:
+	@"$$MINICPM_PYTHON" "$(CURDIR)/scripts/minicpm.py" start
+
+minicpm-status:
+	@"$$MINICPM_PYTHON" "$(CURDIR)/scripts/minicpm.py" status
+
+minicpm-stop:
+	@"$$MINICPM_PYTHON" "$(CURDIR)/scripts/minicpm.py" stop
 
 JOYAI_SCRIPT := $(CURDIR)/scripts/joyai.pbs
 JOYAI_LOG := $(HOME)/live-vlm-demo/joyai/logs/pbs_joyai_web.log
