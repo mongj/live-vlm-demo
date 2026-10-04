@@ -104,28 +104,35 @@ the frontend port.
 
 ### MiniCPM-o 4.5 live video (experimental)
 
-1. Start a separate GPU runtime using the
-   [MiniCPM-o-Demo setup guide](https://github.com/OpenBMB/MiniCPM-o-Demo/tree/47709a9210dfd71afa76c058e017fc8c4db5c8d2#quick-start).
-   The app's `make` commands do not start the model.
-2. Set the MiniCPM `base_url` in `web-server/config.toml` to the runtime's
-   `/v1/realtime?mode=video` WebSocket endpoint. The default is
-   `ws://127.0.0.1:18006/v1/realtime?mode=video`.
-   For a remote runtime, run this on the **app gateway host**, replacing the host
-   and remote port to match your allocated runtime:
+On the PBS host, first provision the checkpoint and Python environment using the
+[upstream guide](https://github.com/OpenBMB/MiniCPM-o-Demo/tree/47709a9210dfd71afa76c058e017fc8c4db5c8d2#quick-start).
+Download that pinned revision's source archive. Prepare a **new, user-owned**
+runtime directory outside this repository:
 
-   ```bash
-   ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18006:127.0.0.1:REMOTE_PORT YOUR_GPU_HOST
-   ```
+```bash
+export MINICPM_RUNTIME_ROOT=/absolute/new-runtime
+MINICPM_SOURCE_ARCHIVE=/absolute/upstream.tar.gz \
+MINICPM_MODEL_PATH=/absolute/checkpoint \
+MINICPM_RUNTIME_PYTHON=/absolute/venv/bin/python make minicpm-prepare
+MINICPM_NODE=YOUR_COMPUTE_NODE make minicpm
+make minicpm-status
+```
 
-3. Start the app as above, select **MiniCPM-o 4.5 (Live video)**, set the system
-   prompt, choose a video and click **Start Session**.
-4. Click **Stop Session** when finished; close the tunnel and stop your GPU job
-   separately.
+Preparation applies the bundled FP16/streaming patch offline; it does not install
+dependencies or download weights. Default allocation: one GPU, 8 CPUs, 64 GB,
+45 minutes. Status prints the manual tunnel command; wait for runtime readiness
+in its logs first. Keep the private runtime directory and `.minicpm-state/`
+receipt; they prevent overlapping jobs and allow safe shutdown.
 
-Use nonsensitive clips, disable upstream recording and restrict runtime access.
-Experimental: use short clips; sustained real-time performance is not validated.
-Sessions are limited to five minutes. Typed follow-ups and pause/repeat voice
-commands are not supported.
+Run the tunnel on the app gateway host. The default MiniCPM endpoint is
+`ws://127.0.0.1:18006/v1/realtime?mode=video`. Select **MiniCPM-o 4.5 (Live video)**,
+choose a video, and start the session. Afterwards, stop the session, close the
+tunnel and run `make minicpm-stop`.
+
+Use nonsensitive clips: loopback access is not per-user authentication. Recording
+is disabled. Longer moving-video/speech quality remains unvalidated; sessions
+are capped at five minutes. Typed follow-ups and pause/repeat voice commands
+are not supported.
 
 ## Docker (off-cluster)
 

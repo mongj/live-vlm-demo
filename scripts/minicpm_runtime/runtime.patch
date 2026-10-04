@@ -1,0 +1,716 @@
+--- a/MiniCPMO45/modeling_minicpmo_unified.py
++++ b/MiniCPMO45/modeling_minicpmo_unified.py
+@@ -3984,6 +3984,7 @@
+             audio_waveform=audio_waveform,
+             frame_list=frame_list,
+             max_slice_nums=max_slice_nums,
++            batch_vision_feed=True,
+         )
+     
+     def duplex_generate(
+--- a/MiniCPMO45/utils.py
++++ b/MiniCPMO45/utils.py
+@@ -2088,7 +2088,7 @@
+         past_len = self.get_cache_length()
+         pos_ids = torch.arange(past_len, past_len + L, device=device).unsqueeze(0)  # [1, L]
+ 
+-        out = self.m(
++        out = self.m.model(
+             inputs_embeds=embeds.unsqueeze(0),  # [1, L, H]
+             position_ids=pos_ids,
+             past_key_values=self.cache,
+@@ -2100,7 +2100,7 @@
+         self.cache = out.past_key_values
+ 
+         if return_logits:
+-            logits = self.m.lm_head(out.hidden_states[-1])[:, -1]  # [1, vocab]
++            logits = self.m.lm_head(out.hidden_states[-1][:, -1:])[:, -1]  # [1, vocab]
+             return logits, out.hidden_states[-1]
+ 
+     @torch.no_grad()
+--- a/core/processors/unified.py
++++ b/core/processors/unified.py
+@@ -1376,10 +1376,28 @@
+                 "(quantized layers use integer weights)"
+             )
+         else:
+-            self.model.bfloat16().eval()
++            self.model.half().eval()
+ 
+         if self.device == "cuda":
+             self.model.cuda()
++
++        if not is_quantized:
++            fp16_counts = [0, 0]
++            for kind, tensors in enumerate((self.model.parameters(), self.model.buffers())):
++                for tensor in tensors:
++                    if not tensor.is_floating_point():
++                        continue
++                    if tensor.dtype != torch.float16:
++                        raise RuntimeError("FP16 core startup gate: unexpected floating dtype")
++                    if not torch.isfinite(tensor).all().item():
++                        raise RuntimeError("FP16 core startup gate: non-finite core tensor")
++                    fp16_counts[kind] += 1
++            if fp16_counts[0] == 0:
++                raise RuntimeError("FP16 core startup gate: no floating parameters")
++            logger.info(
++                f"FP16 core startup gate passed: floating_parameters={fp16_counts[0]}, "
++                f"floating_buffers={fp16_counts[1]}"
++            )
+ 
+         load_time = time.time() - start
+         logger.info(
+--- a/py_backend/server.py
++++ b/py_backend/server.py
+@@ -15,6 +15,7 @@
+ import logging
+ import time
+ import uuid
++from collections import deque
+ from contextlib import asynccontextmanager, suppress
+ from dataclasses import dataclass, field
+ from typing import Any, Dict, Optional
+@@ -38,6 +39,91 @@
+ SERVER_CONFIG: Dict[str, Any] = {}
+ _backend: Any = None
+ _server_state: Optional["BackendServerState"] = None
++
++# Bounds cover queued raw UTF-8 inputs, plus at most one active input with the
++# same byte limit. They are overload limits, not a real-time throughput promise.
++DUPLEX_INPUT_MAX_MESSAGES = 8
++DUPLEX_INPUT_MAX_BYTES = 16 * 1024 * 1024
++DUPLEX_INPUT_MAX_AGE_S = 10.0
++TURN_INPUT_MAX_MESSAGES = 1
++TURN_INPUT_MAX_BYTES = 128 * 1024 * 1024
++TURN_INPUT_MAX_AGE_S = 30.0
++CLOSE_WAIT_S = 10.0
++TRANSPORT_CLOSE_WAIT_S = 2.0
++
++
++class InputOverload(RuntimeError):
++    """The session cannot accept input without exceeding its declared bounds."""
++
++
++class PendingInputs:
++    def __init__(self, mode: str) -> None:
++        duplex = mode == "full_duplex"
++        self.max_messages = DUPLEX_INPUT_MAX_MESSAGES if duplex else TURN_INPUT_MAX_MESSAGES
++        self.max_bytes = DUPLEX_INPUT_MAX_BYTES if duplex else TURN_INPUT_MAX_BYTES
++        self.max_age = DUPLEX_INPUT_MAX_AGE_S if duplex else TURN_INPUT_MAX_AGE_S
++        self.items: deque[tuple[float, int, str]] = deque()
++        self.bytes = 0
++        self.changed = asyncio.Event()
++
++    def put_nowait(self, raw: str) -> None:
++        size = len(raw.encode("utf-8"))
++        if len(self.items) >= self.max_messages or self.bytes + size > self.max_bytes:
++            raise InputOverload("pending input count or byte limit exceeded")
++        if self.items and time.monotonic() - self.items[0][0] >= self.max_age:
++            raise InputOverload("pending input age limit exceeded")
++        self.items.append((time.monotonic(), size, raw))
++        self.bytes += size
++        self.changed.set()
++
++    async def get(self) -> str:
++        while not self.items:
++            self.changed.clear()
++            await self.changed.wait()
++        queued_at, size, raw = self.items.popleft()
++        self.bytes -= size
++        self.changed.set()
++        if time.monotonic() - queued_at >= self.max_age:
++            raise InputOverload("pending input age limit exceeded")
++        return raw
++
++    async def watch_age(self) -> None:
++        while True:
++            self.changed.clear()
++            if not self.items:
++                await self.changed.wait()
++                continue
++            remaining = self.max_age - (time.monotonic() - self.items[0][0])
++            if remaining <= 0:
++                raise InputOverload("pending input age limit exceeded")
++            try:
++                await asyncio.wait_for(self.changed.wait(), remaining)
++            except asyncio.TimeoutError:
++                # A consumer may have removed the old head as this timer fired.
++                # Recheck the current queue and monotonic age before rejecting.
++                continue
++
++
++async def _settle_owned_task(task: asyncio.Future) -> Any:
++    """Do not release model ownership when cancellation only cancels an await.
++
++    Cancellation is re-raised *after* the actual task/thread ends. A hung model
++    deliberately keeps this backend reserved; the external PBS lifetime is the
++    ultimate bound, not unsafe in-process reuse of a still-running model.
++    """
++    cancelled = False
++    while not task.done():
++        try:
++            await asyncio.shield(task)
++        except asyncio.CancelledError:
++            cancelled = True
++        except Exception:
++            break
++    if cancelled:
++        if not task.cancelled():
++            task.exception()
++        raise asyncio.CancelledError
++    return task.result()
+ 
+ 
+ def _payload(message: Dict[str, Any]) -> Dict[str, Any]:
+@@ -166,19 +252,33 @@
+         self._finalize_done.set()
+         self._finalize_task: Optional[asyncio.Task[None]] = None
+         self._op_lock = asyncio.Lock()
++        self._send_lock = asyncio.Lock()
++        self._operations: set[asyncio.Task] = set()
++        self._close_task: Optional[asyncio.Task] = None
++        self.closing = asyncio.Event()
+         self._active_response_id: Optional[str] = None
+         self._usage = SessionUsage()
+         self._usage_chunk_index = 0
+ 
+     async def send(self, event_type: str, **fields: Any) -> None:
+-        data = {"type": event_type, **{k: v for k, v in fields.items() if v is not None}}
+-        data["server_send_ts"] = time.time()
+-        await self.ws.send_json(data)
++        async with self._send_lock:
++            if self.closed and event_type != "session.closed":
++                return
++            data = {"type": event_type, **{k: v for k, v in fields.items() if v is not None}}
++            data["server_send_ts"] = time.time()
++            await self.ws.send_json(data)
+ 
+     async def send_output_delta(self, kind: str, **fields: Any) -> None:
+         await self.send("response.output.delta", kind=kind, **fields)
+ 
+     async def init(self, params: Dict[str, Any]) -> None:
++        await self._run_operation(self._initialize(params))
++
++    async def _initialize(self, params: Dict[str, Any]) -> None:
++        async with self._op_lock:
++            await self._initialize_locked(params)
++
++    async def _initialize_locked(self, params: Dict[str, Any]) -> None:
+         if self.initialized:
+             raise RuntimeError("session is already initialized")
+         if self.mode == "full_duplex":
+@@ -193,6 +293,9 @@
+         )
+ 
+     async def push(self, message: Dict[str, Any]) -> None:
++        await self._run_operation(self._push(message))
++
++    async def _push(self, message: Dict[str, Any]) -> None:
+         if self.closed:
+             raise RuntimeError("session is closed")
+         if not self.initialized:
+@@ -206,54 +309,69 @@
+             return
+         raise RuntimeError(f"unsupported mode: {self.mode}")
+ 
+-    async def close(self, *, reason: str = "client_closed", emit_event: bool = True) -> None:
++    async def _run_operation(self, coroutine: Any) -> Any:
+         if self.closed:
+-            return
+-        self.closed = True
++            coroutine.close()
++            raise RuntimeError("session is closed")
++        task = asyncio.create_task(coroutine)
++        self._operations.add(task)
++
++        def completed(done: asyncio.Task) -> None:
++            self._operations.discard(done)
++            if not done.cancelled():
++                done.exception()  # also consume failures after a waiter disconnects
++
++        task.add_done_callback(completed)
++        return await asyncio.shield(task)
++
++    async def _model_call(self, function: Any, *args: Any, **kwargs: Any) -> Any:
++        return await _settle_owned_task(asyncio.create_task(asyncio.to_thread(function, *args, **kwargs)))
++
++    async def close(self, *, reason: str = "client_closed", emit_event: bool = True,
++                    code: int = 1000, diagnostic: Optional[Dict[str, Any]] = None) -> None:
++        if self._close_task is None:
++            self.closed = True
++            self.closing.set()
++            self._close_task = asyncio.create_task(self._close(reason, emit_event, code, diagnostic))
++            self._close_task.add_done_callback(self._close_finished)
++        # Timeout/cancellation must not cancel teardown or its model threads.
++        await asyncio.wait_for(asyncio.shield(self._close_task), CLOSE_WAIT_S)
++
++    def _close_finished(self, task: asyncio.Task) -> None:
++        if not task.cancelled() and task.exception() is not None:
++            logger.error("backend teardown failed; reservation retained: session=%s", self.session_id)
++
++    async def _close(self, reason: str, emit_event: bool, code: int,
++                     diagnostic: Optional[Dict[str, Any]]) -> None:
++        async def close_transport() -> None:
++            if emit_event:
++                with suppress(Exception):
++                    await self.send("session.closed", session_id=self.session_id, reason=reason,
++                                    diagnostic=diagnostic, usage=self._usage.snapshot())
++            async with self._send_lock:
++                with suppress(Exception):
++                    await self.ws.close(code=code, reason=reason)
++
++        with suppress(asyncio.TimeoutError):
++            await asyncio.wait_for(close_transport(), TRANSPORT_CLOSE_WAIT_S)
++        if self._operations:
++            await _settle_owned_task(asyncio.gather(*self._operations, return_exceptions=True))
+         await self._drain_finalize()
+-
+         if self.mode == "full_duplex":
+-            with suppress(Exception):
+-                await asyncio.to_thread(self.backend.duplex_stop)
+-            await self._drain_finalize()
+-            await asyncio.to_thread(self.backend.duplex_cleanup)
+-
+-        if emit_event:
+-            with suppress(Exception):
+-                await self.send(
+-                    "session.closed",
+-                    session_id=self.session_id,
+-                    reason=reason,
+-                    usage=self._usage.snapshot(),
+-                )
+-        with suppress(Exception):
+-            await self.ws.close(code=1000, reason=reason)
++            await self._model_call(self.backend.duplex_stop)
++            await self._model_call(self.backend.duplex_cleanup)
++        # Only successful, fully settled cleanup permits a new model session.
+         await self.state.forget(self.session_id)
+ 
+     async def fatal(self, reason: str, *, message: Optional[str] = None) -> None:
+         logger.error("fatal backend session termination: session=%s reason=%s message=%s", self.session_id, reason, message)
+-        self.closed = True
+-        with suppress(Exception):
+-            await self.send(
+-                "session.closed",
+-                session_id=self.session_id,
+-                reason=reason,
+-                diagnostic={"message": message} if message else None,
+-                usage=self._usage.snapshot(),
+-            )
+-        with suppress(Exception):
+-            await self.ws.close(code=1011, reason=reason)
+-        with suppress(Exception):
+-            if self.mode == "full_duplex":
+-                await asyncio.to_thread(self.backend.duplex_stop)
+-                await self._drain_finalize()
+-                await asyncio.to_thread(self.backend.duplex_cleanup)
+-        await self.state.forget(self.session_id)
++        await self.close(reason=reason, code=1013 if reason == "input_overload" else 1011,
++                         diagnostic={"message": message} if message else None)
+ 
+     async def _init_duplex(self, params: Dict[str, Any]) -> None:
+         config = _first_dict(params.get("config"), params.get("duplex"))
+         if config:
+-            await asyncio.to_thread(self.backend.set_duplex_config, config)
++            await self._model_call(self.backend.set_duplex_config, config)
+ 
+         voice = _first_dict(params.get("voice"), params.get("defaults"))
+         refs = resolve_duplex_voice_refs(
+@@ -270,7 +388,7 @@
+             ),
+         )
+         try:
+-            prepared = await asyncio.to_thread(
++            prepared = await self._model_call(
+                 self.backend.duplex_prepare,
+                 system_prompt_text=_coalesce(
+                     params.get("system_prompt"),
+@@ -296,7 +414,7 @@
+             messages = parse_raw_messages(request.messages)
+             model_msgs = convert_to_model_msgs(messages)
+ 
+-            await asyncio.to_thread(
++            await self._model_call(
+                 self.backend.chat_prefill,
+                 session_id=self.session_id,
+                 msgs=model_msgs,
+@@ -307,7 +425,7 @@
+             )
+ 
+             if request.generate_audio and request.streaming:
+-                await asyncio.to_thread(self.backend.chat_init_tts, request.tts_ref_audio)
++                await self._model_call(self.backend.chat_init_tts, request.tts_ref_audio)
+ 
+             if request.streaming:
+                 await self._stream_turn_based(request, response_id=response_id, input_id=input_id)
+@@ -369,11 +487,10 @@
+                 if tag == "error":
+                     raise payload
+         finally:
+-            with suppress(asyncio.TimeoutError):
+-                await asyncio.wait_for(task, timeout=5.0)
++            await _settle_owned_task(task)
+ 
+     async def _non_stream_turn_based(self, request: Any, *, response_id: str, input_id: Optional[str]) -> None:
+-        result = await asyncio.to_thread(
++        result = await self._model_call(
+             self.backend.chat_non_streaming_generate,
+             session_id=self.session_id,
+             max_new_tokens=request.max_new_tokens,
+@@ -432,7 +549,7 @@
+                 result = self.backend.duplex_generate(force_listen=force_listen)
+                 return result, prefill_ms, prefill_result, self._safe_metrics()
+ 
+-            result, prefill_ms, prefill_result, backend_metrics = await asyncio.to_thread(_duplex_step)
++            result, prefill_ms, prefill_result, backend_metrics = await self._model_call(_duplex_step)
+             wall_clock_ms = (time.perf_counter() - t0) * 1000
+             metrics = _result_metrics(result, backend_metrics)
+             metrics["prefill_ms"] = round(prefill_ms, 1)
+@@ -539,7 +656,7 @@
+ 
+         async def _run() -> None:
+             try:
+-                await asyncio.to_thread(self.backend.duplex_finalize)
++                await self._model_call(self.backend.duplex_finalize)
+             finally:
+                 self._finalize_done.set()
+ 
+@@ -549,14 +666,39 @@
+         task = self._finalize_task
+         if task is None:
+             return
+-        if task.done():
++        await _settle_owned_task(task)
++        self._finalize_task = None
++
++
++async def _receive_inputs(ws: WebSocket, session: BackendProtocolSession) -> None:
++    pending = PendingInputs(session.mode)
++
++    async def receive() -> None:
++        while not session.closed:
++            # Never await a full application queue: doing so stalls control
++            # frames behind ASGI/WebSocket backpressure and starves heartbeats.
++            pending.put_nowait(await ws.receive_text())
++
++    async def process() -> None:
++        while not session.closed:
++            message = json.loads(await pending.get())
++            msg_type = _message_type(message)
++            if msg_type != "input.append":
++                raise RuntimeError(f"unsupported message type: {msg_type}")
++            await session.push(message)
++
++    tasks = [asyncio.create_task(receive()), asyncio.create_task(process()),
++             asyncio.create_task(pending.watch_age()), asyncio.create_task(session.closing.wait())]
++    try:
++        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
++        for task in done:
+             task.result()
+-            self._finalize_task = None
+-            return
+-        try:
+-            await asyncio.wait_for(task, timeout=5.0)
+-        finally:
+-            self._finalize_task = None
++    finally:
++        for task in tasks:
++            task.cancel()
++        # A process waiter can be canceled; session owns and shields the actual
++        # operation until the thread ends, even after this route is disconnected.
++        await asyncio.gather(*tasks, return_exceptions=True)
+ 
+ 
+ @asynccontextmanager
+@@ -574,7 +716,9 @@
+         for session in list((_server_state.sessions if _server_state else {}).values()):
+             with suppress(Exception):
+                 await session.close(reason="server_shutdown")
+-        if _backend is not None and hasattr(_backend, "shutdown"):
++        if _server_state is not None and _server_state.sessions:
++            logger.error("backend still reserved during shutdown; refusing concurrent model shutdown")
++        elif _backend is not None and hasattr(_backend, "shutdown"):
+             await asyncio.to_thread(_backend.shutdown)
+ 
+ 
+@@ -583,8 +727,9 @@
+ 
+ @app.get("/health")
+ async def health() -> Dict[str, Any]:
++    closing = _server_state is not None and any(s.closed for s in _server_state.sessions.values())
+     return {
+-        "status": "ready" if _backend is not None else "loading",
++        "status": "closing" if closing else ("ready" if _backend is not None else "loading"),
+         "backend": "pytorch",
+         "worker_status": getattr(_backend, "status", None),
+         "active_session_id": _server_state.active_session_id if _server_state else None,
+@@ -599,6 +744,7 @@
+ 
+     await ws.accept()
+     session: Optional[BackendProtocolSession] = None
++    registered = False
+     try:
+         first = json.loads(await ws.receive_text())
+         if _message_type(first) != "session.init":
+@@ -616,26 +762,26 @@
+             state=_server_state,
+         )
+         await _server_state.register(session)
++        registered = True
+         await session.init(params)
+-
+-        while not session.closed:
+-            message = json.loads(await ws.receive_text())
+-            msg_type = _message_type(message)
+-            if msg_type == "input.append":
+-                await session.push(message)
+-                continue
+-            # close 只走 HTTP unary 控制通道（见协议 network §3.2），WS 上不接受 close
+-            raise RuntimeError(f"unsupported message type: {msg_type}")
++        await _receive_inputs(ws, session)
+ 
+     except WebSocketDisconnect:
+-        if session is not None:
+-            await session.close(reason="client_disconnected", emit_event=False)
++        if registered:
++            with suppress(Exception):
++                await session.close(reason="client_disconnected", emit_event=False)
++    except asyncio.CancelledError:
++        if registered:
++            with suppress(Exception):
++                await session.close(reason="server_cancelled", emit_event=False)
++        raise
+     except Exception as exc:
+-        if session is not None:
+-            await session.fatal("backend_error", message=str(exc))
++        if registered:
++            with suppress(Exception):
++                await session.fatal("input_overload" if isinstance(exc, InputOverload) else "backend_error", message=str(exc))
+         else:
+             with suppress(Exception):
+-                await ws.close(code=1011, reason="backend_error")
++                await ws.close(code=1013, reason="backend_unavailable")
+ 
+ 
+ @app.post("/sessions/{session_id}/close")
+@@ -653,7 +799,10 @@
+         if isinstance(body, dict) and body.get("reason"):
+             reason = str(body["reason"])
+ 
+-    await session.close(reason=reason)
++    try:
++        await session.close(reason=reason)
++    except asyncio.TimeoutError:
++        raise HTTPException(status_code=503, detail="backend teardown pending; session remains reserved") from None
+     return {"ok": True, "session_id": session_id, "closed": True}
+ 
+ 
+--- a/worker.py
++++ b/worker.py
+@@ -22,6 +22,7 @@
+ from typing import Optional, List, Dict, Any
+ 
+ import numpy as np
++import httpx
+ import uvicorn
+ from contextlib import asynccontextmanager
+ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+@@ -58,6 +59,9 @@
+ 
+ # 启动参数（通过 main() 传入）
+ WORKER_CONFIG: Dict[str, Any] = {}
++BACKEND_HEALTH_TIMEOUT_S = 2.0
++BACKEND_CLOSE_TIMEOUT_S = 12.0
++TRANSPORT_CLOSE_TIMEOUT_S = 5.0
+ 
+ 
+ class RemoteBackendWorker:
+@@ -67,7 +71,72 @@
+         self.backend_server_url = backend_server_url
+         self.gpu_id = gpu_id
+         self.processor = None
+-        self.state = WorkerState(status=WorkerStatus.IDLE)
++        self.state = WorkerState(status=WorkerStatus.LOADING)
++        self._bridge_active = False
++        self._backend_verified = False
++        self._availability_epoch = 0
++        self.cleanup_task: Optional[asyncio.Task] = None
++
++    async def _backend_available(self) -> bool:
++        try:
++            async with asyncio.timeout(BACKEND_HEALTH_TIMEOUT_S):
++                async with httpx.AsyncClient(timeout=BACKEND_HEALTH_TIMEOUT_S,
++                                             trust_env=False, follow_redirects=False) as client:
++                    response = await client.get(f"{self.backend_server_url.rstrip('/')}/health")
++                    response.raise_for_status()
++                    data = response.json()
++            return (isinstance(data, dict) and data.get("status") == "ready"
++                    and "active_session_id" in data and data["active_session_id"] is None)
++        except Exception:
++            return False
++
++    async def refresh_availability(self) -> bool:
++        if self._bridge_active:
++            return self._backend_verified
++        self._availability_epoch += 1
++        epoch = self._availability_epoch
++        ready = await self._backend_available()
++        # A health request started before admission/cleanup is not allowed to
++        # downgrade the newer active bridge or overwrite a newer health result.
++        if not self._bridge_active and epoch == self._availability_epoch:
++            self._backend_verified = ready
++            self.state.status = WorkerStatus.IDLE if ready else WorkerStatus.ERROR
++        return self._backend_verified
++
++    async def claim(self, active_status: WorkerStatus) -> bool:
++        if self._bridge_active:
++            return False
++        # Atomic with respect to the asyncio loop: claim BEFORE the first await,
++        # including both the readiness probe and WebSocket acceptance.
++        self._bridge_active = True
++        self._availability_epoch += 1
++        self.state.status = active_status
++        try:
++            self._backend_verified = await self._backend_available()
++            if self._backend_verified:
++                return True
++        except BaseException:
++            self._bridge_active = False
++            self._backend_verified = False
++            self._availability_epoch += 1
++            self.state.status = WorkerStatus.ERROR
++            raise
++        self._bridge_active = False
++        self._availability_epoch += 1
++        self.state.status = WorkerStatus.ERROR
++        return False
++
++    async def finish_bridge(self) -> None:
++        self.state.status = WorkerStatus.ERROR
++        self._backend_verified = False
++        # Keep the claim during this final probe. session.closed confirms only
++        # transport closure; backend inference/cleanup may still be running.
++        ready = await self._backend_available()
++        self._availability_epoch += 1
++        self._bridge_active = False
++        self._backend_verified = ready
++        self.state.status = WorkerStatus.IDLE if ready else WorkerStatus.ERROR
++        self.state.current_ticket_id = None
+ 
+     def metrics(self) -> Dict[str, Any]:
+         return {"backend": "backend_server", "backend_server_url": self.backend_server_url}
+@@ -155,8 +224,10 @@
+ 
+     worker_metrics = worker.metrics()
+     kv_len = int(worker_metrics.get("kv_cache_length", 0) or 0)
+-    remote_backend_url = _backend_server_url()
+-    model_loaded = bool(remote_backend_url) or worker.processor is not None or bool(getattr(worker.state, "is_idle", False))
++    if isinstance(worker, RemoteBackendWorker):
++        model_loaded = await worker.refresh_availability()
++    else:
++        model_loaded = worker.processor is not None or bool(getattr(worker.state, "is_idle", False))
+     return WorkerHealthResponse(
+         status="healthy" if model_loaded else "error",
+         worker_status=worker.state.status,
+@@ -187,17 +258,14 @@
+     if worker is None:
+         await ws.close(code=1013, reason="Worker not ready")
+         return
+-    if not worker.state.is_idle:
+-        await ws.close(code=1013, reason=f"Worker busy: {worker.state.status.value}")
++    owner = worker
++    if not isinstance(owner, RemoteBackendWorker) or not await owner.claim(active_status):
++        await ws.close(code=1013, reason="Worker backend unavailable or busy")
+         return
+ 
+-    await ws.accept()
+-    worker.state.status = active_status
+-    runtime = BackendRuntimeSession(
+-        backend_base_url=backend_url,
+-        mode=mode,
+-    )
++    runtime: Optional[BackendRuntimeSession] = None
+     backend_closed = False
++    bridge_tasks: list[asyncio.Task] = []
+ 
+     async def _send_runtime_event(event: Any) -> Dict[str, Any]:
+         payload = _event_payload(event)
+@@ -205,6 +273,8 @@
+         return payload
+ 
+     try:
++        runtime = BackendRuntimeSession(backend_base_url=backend_url, mode=mode)
++        await ws.accept()
+         first = json.loads(await ws.receive_text())
+         first_type = str(first.get("type") or "")
+         pending_input: Optional[Dict[str, Any]] = None
+@@ -259,15 +329,9 @@
+                     backend_closed = True
+                     return
+ 
+-        done, pending = await asyncio.wait(
+-            [
+-                asyncio.create_task(client_to_backend()),
+-                asyncio.create_task(backend_to_client()),
+-            ],
+-            return_when=asyncio.FIRST_COMPLETED,
+-        )
+-        for task in pending:
+-            task.cancel()
++        bridge_tasks = [asyncio.create_task(client_to_backend()),
++                        asyncio.create_task(backend_to_client())]
++        done, pending = await asyncio.wait(bridge_tasks, return_when=asyncio.FIRST_COMPLETED)
+         for task in done:
+             task.result()
+ 
+@@ -278,23 +342,38 @@
+         try:
+             await ws.send_json({
+                 "type": "session.closed",
+-                "session_id": runtime.session_id,
++                "session_id": runtime.session_id if runtime is not None else None,
+                 "reason": "backend_error",
+             })
+         except Exception:
+             pass
+     finally:
+-        try:
+-            if not backend_closed:
+-                await runtime.unary("close", {"reason": "worker_disconnected"})
+-        except Exception:
+-            logger.exception("Remote backend runtime cleanup failed")
+-        worker.state.status = idle_status
+-        worker.state.current_ticket_id = None
+-        try:
+-            await ws.close()
+-        except Exception:
+-            pass
++        async def cleanup() -> None:
++            for task in bridge_tasks:
++                task.cancel()
++            await asyncio.gather(*bridge_tasks, return_exceptions=True)
++            if runtime is not None:
++                try:
++                    if not backend_closed:
++                        await asyncio.wait_for(runtime.unary("close", {"reason": "worker_disconnected"}),
++                                               BACKEND_CLOSE_TIMEOUT_S)
++                except Exception:
++                    logger.exception("Remote backend runtime cleanup pending or failed")
++                finally:
++                    try:
++                        await asyncio.wait_for(runtime.aclose(), TRANSPORT_CLOSE_TIMEOUT_S)
++                    except Exception:
++                        logger.exception("Remote backend transport close failed")
++            try:
++                await asyncio.wait_for(ws.close(), TRANSPORT_CLOSE_TIMEOUT_S)
++            except Exception:
++                pass
++            await owner.finish_bridge()
++
++        # Retain ownership even if a second cancellation interrupts this route's
++        # cleanup wait. A pending cleanup keeps admission and health non-idle.
++        owner.cleanup_task = asyncio.create_task(cleanup())
++        await asyncio.shield(owner.cleanup_task)
+ 
+ 
+ @app.websocket("/v1/worker/chat")

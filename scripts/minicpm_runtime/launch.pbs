@@ -1,0 +1,47 @@
+#!/bin/bash
+#PBS -j oe
+# Resource selection and the bounded walltime are supplied by the app facade.
+set -euo pipefail
+umask 077
+test -n "${PBS_JOBID:-}" || { echo 'PBS_JOBID required; submit through PBS.' >&2; exit 2; }
+test -n "${MINICPM_RUNTIME_ROOT:-}" || { echo 'MINICPM_RUNTIME_ROOT must name an existing prepared runtime.' >&2; exit 2; }
+unset PYTHONPATH PYTHONHOME
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+# PBS copies this script to its spool; never resolve support files relative to it.
+exec python3 -I - "$MINICPM_RUNTIME_ROOT" <<'PY'
+import os
+import hashlib
+from pathlib import Path
+import runpy
+import stat
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10+ is required for the runtime bootstrap")
+root = Path(sys.argv[1])
+runtime = root / "runtime"
+hashes = {
+    "gateway_private.py": "1fdcc30f9e41e70784612f7099066589bac6d24c41e3be363ca0179d21225373",
+    "prepare.py": "3591c999e6dc0438525ccfdc4c4e2878beaf7c7a1fcce24915837c3b8779c443",
+    "run.py": "6a2fd390af4e2df0c93686a63b99a0b06428f3f6ed4e1c47b1f77f7f8eb0e594",
+    "runtime.patch": "d73daa6be7a1da0a648811cdc727b8da0a30d691874d1bebc6c37a5c3f5affd8",
+    "safety.py": "ebbb943baa3db44f8488f3f47eee717c1572b7992c430f6d45a91289fdf65440",
+    "supervisor.py": "eb52e918cf633b8fe31fe5266203e1b58e24a5ada5eebd5f7f041218b0f4641b"
+}
+# Check ownership before importing ANY code from the caller-supplied root.
+for path in (root, runtime, *runtime.glob("*.py")):
+    info = path.lstat()
+    valid_kind = stat.S_ISDIR(info.st_mode) if path in (root, runtime) else stat.S_ISREG(info.st_mode)
+    if not path.is_absolute() or path.resolve() != path or not valid_kind or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise SystemExit("Runtime bootstrap requires private owned nonsymlink paths")
+for name, expected in hashes.items():
+    path = runtime / name
+    info = path.lstat()
+    if path.resolve() != path or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise SystemExit("Runtime support file is not private, owned and regular")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise SystemExit("Runtime support code differs from the reviewed launcher")
+sys.path.insert(0, str(runtime))
+sys.argv = [str(runtime / "run.py"), "--root", str(root)]
+runpy.run_path(sys.argv[0], run_name="__main__")
+PY

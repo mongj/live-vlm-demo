@@ -2,7 +2,7 @@
 
 import { useSyncExternalStore } from "react";
 
-const DESKTOP_QUERY = "(min-width: 768px)";
+export const DESKTOP_QUERY = "(min-width: 768px)";
 
 function subscribeDesktop(onStoreChange: () => void) {
   const media = window.matchMedia(DESKTOP_QUERY);
