@@ -102,37 +102,53 @@ tail -n 50 -F joyai/logs/joyai_web.run.log joyai/logs/webinfer.log
 catalog keeps `base_url = "http://127.0.0.1:8070/v1"`. The Mac still forwards only
 the frontend port.
 
-### MiniCPM-o 4.5 live video (experimental)
+### MiniCPM on a PBS compute node
 
-On the PBS host, first provision the checkpoint and Python environment using the
-[upstream guide](https://github.com/OpenBMB/MiniCPM-o-Demo/tree/47709a9210dfd71afa76c058e017fc8c4db5c8d2#quick-start).
-Download that pinned revision's source archive. Prepare a **new, user-owned**
-runtime directory outside this repository:
+Run from an account-owned checkout on `caquelon`. Each account needs a prepared
+MiniCPM runtime and access to a compatible 48 GB GPU node.
+
+Configure once, replacing the runtime path:
 
 ```bash
-export MINICPM_RUNTIME_ROOT=/absolute/new-runtime
-MINICPM_SOURCE_ARCHIVE=/absolute/upstream.tar.gz \
-MINICPM_MODEL_PATH=/absolute/checkpoint \
-MINICPM_RUNTIME_PYTHON=/absolute/venv/bin/python make minicpm-prepare
-MINICPM_NODE=YOUR_COMPUTE_NODE make minicpm
+MINICPM_RUNTIME_ROOT=/absolute/prepared-runtime \
+MINICPM_NODE=cvml04 make minicpm-configure
+```
+
+Start and check status:
+
+```bash
+make minicpm
 make minicpm-status
 ```
 
-Preparation applies the bundled FP16/streaming patch offline; it does not install
-dependencies or download weights. Default allocation: one GPU, 8 CPUs, 64 GB,
-45 minutes. Status prints the manual tunnel command; wait for runtime readiness
-in its logs first. Keep the private runtime directory and `.minicpm-state/`
-receipt; they prevent overlapping jobs and allow safe shutdown.
+Wait for `RUNTIME_CAPACITY_READY` in the runtime logs, then run the printed tunnel
+command on the gateway host. Select **MiniCPM-o 4.5 (Live video)** in the app.
+The job requests one GPU for 45 minutes and may queue.
 
-Run the tunnel on the app gateway host. The default MiniCPM endpoint is
-`ws://127.0.0.1:18006/v1/realtime?mode=video`. Select **MiniCPM-o 4.5 (Live video)**,
-choose a video, and start the session. Afterwards, stop the session, close the
-tunnel and run `make minicpm-stop`.
+Stop with `make minicpm-stop`; close the SSH tunnel separately. Keep
+`.minicpm-state/` so subsequent commands retain the settings and tracked job.
 
-Use nonsensitive clips: loopback access is not per-user authentication. Recording
-is disabled. Longer moving-video/speech quality remains unvalidated; sessions
-are capped at five minutes. Typed follow-ups and pause/repeat voice commands
-are not supported.
+<details>
+<summary>First-time runtime preparation</summary>
+
+Install the checkpoint and model dependencies using the
+[pinned upstream guide](https://github.com/OpenBMB/MiniCPM-o-Demo/tree/47709a9210dfd71afa76c058e017fc8c4db5c8d2#quick-start),
+and obtain that revision's source archive. The model and environment must be
+owned by the account or root and available on the selected compute node.
+Prepare a new directory outside the repository, replacing the three input paths:
+
+```bash
+MINICPM_RUNTIME_ROOT="$HOME/minicpm-runtime" \
+MINICPM_SOURCE_ARCHIVE=/absolute/upstream.tar.gz \
+MINICPM_MODEL_PATH=/absolute/checkpoint \
+MINICPM_RUNTIME_PYTHON=/absolute/venv/bin/python \
+make minicpm-prepare
+```
+
+Use that runtime path in `make minicpm-configure`. Preparation applies the
+bundled patches; it does not download weights or install dependencies.
+
+</details>
 
 ## Docker (off-cluster)
 

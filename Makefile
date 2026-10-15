@@ -15,6 +15,7 @@ help:
 		'  down               Stop gateway and frontend' \
 		'  joyai              Submit PBS job and print manual tunnel commands' \
 		'  minicpm-prepare    Prepare an owned offline MiniCPM runtime (no install or GPU)' \
+		'  minicpm-configure  Save a prepared runtime and compute node for this account/checkout' \
 		'  minicpm            Submit one provisioned, reviewed MiniCPM PBS runtime (45 minutes)' \
 		'  minicpm-status     Show tracked PBS state and manual loopback tunnel instructions' \
 		'  minicpm-stop       Request shutdown of the verified tracked own PBS job'
@@ -35,11 +36,14 @@ export MINICPM_PYTHON MINICPM_LAUNCHER MINICPM_MODEL_PATH MINICPM_NODE MINICPM_N
 export MINICPM_WALLTIME MINICPM_STATE_DIR MINICPM_YES
 export MINICPM_SOURCE_ARCHIVE MINICPM_RUNTIME_ROOT MINICPM_RUNTIME_PYTHON
 
-.PHONY: minicpm-prepare minicpm minicpm-status minicpm-stop
+.PHONY: minicpm-prepare minicpm-configure minicpm minicpm-status minicpm-stop
 minicpm-prepare:
 	@"$$MINICPM_PYTHON" "$(CURDIR)/scripts/minicpm_runtime/prepare.py" prepare \
 		--archive "$$MINICPM_SOURCE_ARCHIVE" --root "$$MINICPM_RUNTIME_ROOT" \
 		--model "$$MINICPM_MODEL_PATH" --python "$$MINICPM_RUNTIME_PYTHON"
+
+minicpm-configure:
+	@"$$MINICPM_PYTHON" "$(CURDIR)/scripts/minicpm.py" configure
 
 minicpm:
 	@"$$MINICPM_PYTHON" "$(CURDIR)/scripts/minicpm.py" start

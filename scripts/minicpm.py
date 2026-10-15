@@ -2,8 +2,11 @@
 """Manage one prepared, user-reviewed guarded PBS runtime. No provisioning or SSH.
 
 Requires Python 3.10+, POSIX locking and PBS qsub/qstat/qdel. Supply site values
-through MINICPM_* environment variables or the corresponding data-only options;
-keep them outside Git. Defaults request one GPU, 8 CPUs, 64 GB and 45 minutes.
+through MINICPM_* environment variables or the corresponding data-only options.
+configure saves a validated runtime-root and node in the private state directory
+for this account/checkout. Start uses saved values only when not overridden by
+options/environment. An explicit external launcher never inherits saved values.
+Keep state outside Git. Defaults request one GPU, 8 CPUs, 64 GB and 45 minutes.
 MINICPM_RUNTIME_ROOT selects the bundled launcher after checking its separately
 prepared runtime. Alternatively, supply MINICPM_LAUNCHER and MINICPM_MODEL_PATH;
 that external launcher must enforce allocation, integrity, privacy and owned-child
@@ -91,7 +94,7 @@ def read_state(path: Path):
     return data
 
 
-def write_state(path: Path, data: dict):
+def write_state(path: Path, data: dict, *, name="job.json"):
     temporary = path / ("receipt-" + uuid.uuid4().hex)
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -100,7 +103,7 @@ def write_state(path: Path, data: dict):
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path / "job.json")
+        os.replace(temporary, path / name)
         directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory_fd)
@@ -108,6 +111,54 @@ def write_state(path: Path, data: dict):
             os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def read_config(path: Path):
+    try:
+        fd = os.open(path / "config.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {}
+    with os.fdopen(fd) as handle:
+        trusted(os.fstat(handle.fileno()))
+        raw = handle.read(16385)
+    if len(raw) > 16384:
+        fail("Saved MiniCPM configuration is too large")
+    data = json.loads(raw)
+    if not isinstance(data, dict) or set(data) != {"version", "owner_uid", "runtime_root", "node"} \
+            or type(data["version"]) is not int or data["version"] != 1 \
+            or type(data["owner_uid"]) is not int or data["owner_uid"] != os.geteuid():
+        fail("Invalid saved MiniCPM configuration or owner; run make minicpm-configure to repair owned settings")
+    root, node = data["runtime_root"], data["node"]
+    if not isinstance(root, str) or not Path(root).is_absolute() or any(c in root for c in ",\n\r\0") \
+            or not isinstance(node, str) or not HOST.fullmatch(node):
+        fail("Invalid runtime path or node in saved MiniCPM configuration")
+    return data
+
+
+def use_saved_config(args, path: Path):
+    # Legacy launchers remain fully explicit. Status/stop never read config, so
+    # damaged settings cannot strand a tracked job. Explicit settings take priority.
+    if not args.launcher and (not args.runtime_root or not args.node):
+        saved = read_config(path)
+        args.runtime_root = args.runtime_root or saved.get("runtime_root", "")
+        args.node = args.node or saved.get("node", "")
+
+
+def configure(args, path: Path):
+    if not args.runtime_root or not args.node or args.launcher:
+        fail("Set MINICPM_RUNTIME_ROOT to an owned prepared runtime and MINICPM_NODE to a compute host, "
+             "then run make minicpm-configure (without MINICPM_LAUNCHER)")
+    config(args)  # Existing integrity/ownership checks; no provisioning or PBS calls.
+    target = path / "config.json"
+    try:
+        trusted(target.lstat())
+    except FileNotFoundError:
+        pass
+    write_state(path, {"version": 1, "owner_uid": os.geteuid(),
+                      "runtime_root": args.runtime_root, "node": args.node}, name="config.json")
+    print(f"Saved MiniCPM settings in {target}.")
+    print(f"Runtime: {args.runtime_root}; compute node: {args.node}.")
+    print("Run make minicpm to submit. No job started; existing job receipt unchanged.")
 
 
 def pbs(command: list[str], *, env=None):
@@ -146,6 +197,9 @@ def verified_job(receipt: dict):
 
 def config(args):
     runtime = Path(__file__).resolve().parent / "minicpm_runtime"
+    if not args.runtime_root and not args.launcher:
+        fail("No MiniCPM runtime configured. Set MINICPM_RUNTIME_ROOT and MINICPM_NODE, then run "
+             "make minicpm-configure. Prepare the owned runtime with make minicpm-prepare first if needed")
     launcher = Path(args.launcher or (runtime / "launch.pbs" if args.runtime_root else ""))
     if args.runtime_root and launcher != runtime / "launch.pbs":
         fail("MINICPM_RUNTIME_ROOT requires the bundled launcher; unset MINICPM_LAUNCHER")
@@ -207,7 +261,7 @@ def show_job(receipt, job):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("start", "status", "stop"))
+    parser.add_argument("command", choices=("configure", "start", "status", "stop"))
     parser.add_argument("--yes", action="store_true", default=os.environ.get("MINICPM_YES") == "1")
     defaults = {"launcher": "", "runtime-root": "", "model-path": "", "node": "", "ncpus": "8", "mem": "64gb",
                 "walltime": "00:45:00", "state-dir": str(Path(__file__).resolve().parents[1] / ".minicpm-state")}
@@ -216,7 +270,10 @@ def main():
     args = parser.parse_args()
     with locked_state(Path(args.state_dir)) as state_path:
         receipt = read_state(state_path)
-        if args.command == "start":
+        if args.command == "configure":
+            configure(args, state_path)
+        elif args.command == "start":
+            use_saved_config(args, state_path)
             launcher, runtime_environment = config(args)
             if receipt:
                 old_job = verified_job(receipt)
