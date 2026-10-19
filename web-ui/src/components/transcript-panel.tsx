@@ -24,8 +24,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { TranscriptMessage } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
 import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
+import type { SpeechCapabilities } from "@/lib/protocol";
+import { inputStatusLabels } from "@/lib/input-feedback.mjs";
 import { BugIcon, MessageSquareIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 export type TranscriptDensity = "comfortable" | "compact";
 
@@ -37,8 +39,11 @@ type TranscriptPanelProps = {
   recoverableError: string | null;
   debugOpen: boolean;
   density?: TranscriptDensity;
+  speechCapabilities?: SpeechCapabilities | null;
+  typedBusy?: boolean;
+  inputStatus?: string;
   onToggleDebug: () => void;
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string) => Promise<boolean>;
 };
 
 function headerClass(density: TranscriptDensity): string {
@@ -185,18 +190,23 @@ export function TranscriptPanel({
   recoverableError,
   debugOpen,
   density = "comfortable",
+  speechCapabilities,
+  typedBusy = false,
+  inputStatus,
   onToggleDebug,
   onSend,
 }: TranscriptPanelProps) {
   const debugLabel = debugOpen ? "Hide debug panel" : "Show debug panel";
-  const inputPolicy = typedInputPolicy(modelId, sessionActive);
+  const inputPolicy = typedInputPolicy(modelId, sessionActive, speechCapabilities, typedBusy);
+  const [draft, setDraft] = useState('');
 
-  function handleSubmit(message: PromptInputMessage) {
-    const text = message.text.trim();
-    if (!text || !inputPolicy.enabled) {
+  async function handleSubmit(message: PromptInputMessage) {
+    const text = message.text;
+    if (!text.trim() || !inputPolicy.enabled) {
       return;
     }
-    void onSend(text);
+    const accepted = await onSend(text);
+    if (accepted) setDraft(current => current === text ? '' : current);
   }
 
   const composer = (
@@ -207,14 +217,17 @@ export function TranscriptPanel({
       {recoverableError && sessionActive ? (
         <p className="mb-2 truncate text-xs text-destructive">{recoverableError}</p>
       ) : null}
+      {inputStatus && sessionActive ? <p className="mb-1 text-xs text-muted-foreground" role="status">{inputStatus}</p> : null}
       <PromptInput className={promptInputClass(density)} maxFiles={0} onSubmit={handleSubmit}>
         <PromptInputTextarea
           className={textareaClass(density)}
           disabled={!inputPolicy.enabled}
-          placeholder={inputPolicy.notice ? "Typed follow-ups unavailable in MiniCPM live video" : sessionActive ? "Ask about what the video shows" : "Start a Session to send a message"}
+          value={draft}
+          onChange={event => setDraft(event.target.value)}
+          placeholder={inputPolicy.notice ? "Typed input unavailable" : sessionActive ? "Ask about what the video shows" : "Start a Session to send a message"}
           rows={textareaRows(density)}
         />
-        <ComposerSubmit density={density} isStreaming={isStreaming} sessionActive={inputPolicy.enabled} />
+        <ComposerSubmit density={density} isStreaming={typedBusy || (modelId !== 'minicpm-o-4-5' && isStreaming)} sessionActive={inputPolicy.enabled} />
       </PromptInput>
     </>
   );
@@ -256,9 +269,13 @@ export function TranscriptPanel({
             messages.map((message) => (
               <Message from={message.role} key={message.id}>
                 <MessageContent>
-                  <MessageResponse isAnimating={message.streaming}>
+                  {message.source ? <div className="text-blue-700 dark:text-blue-200">
+                    <p className="mb-1 text-[10px] font-medium">You · {message.source}</p>
+                    <p className="whitespace-pre-wrap wrap-anywhere">{message.text || (message.streaming ? '…' : '')}</p>
+                    {message.status && message.status in inputStatusLabels ? <p className="mt-1 text-[10px] opacity-80">{message.statusDetail ?? inputStatusLabels[message.status as keyof typeof inputStatusLabels]}</p> : null}
+                  </div> : <MessageResponse isAnimating={message.streaming}>
                     {message.text || (message.streaming ? "…" : "")}
-                  </MessageResponse>
+                  </MessageResponse>}
                 </MessageContent>
               </Message>
             ))

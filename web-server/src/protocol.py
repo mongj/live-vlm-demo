@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import math
+import base64
+import binascii
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from .types import SessionError
 
@@ -44,6 +46,7 @@ class SessionStartedMessage(BaseModel):
     session_id: str
     model: str
     config: dict[str, Any]
+    speech: dict[str, Any] | None = None
 
 
 class SessionEndedMessage(BaseModel):
@@ -65,6 +68,42 @@ class ResponseChunkMessage(BaseModel):
     interrupted: bool = False
     # Echo of the last consumed input.append `t` (Unix ms). Omitted when unknown.
     t: float | None = None
+    turn_order: int | None = None
+    diagnostic: dict[str, Any] | None = None
+
+
+class InputTypedMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    type: Literal["input.typed"]
+    request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    text: str = Field(min_length=1, max_length=500)
+
+    @field_validator("text")
+    @classmethod
+    def nonempty(cls, text: str) -> str:
+        if not text.strip() or any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+            raise ValueError("Invalid text")
+        return text
+
+
+class InputMicrophoneMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    type: Literal["input.microphone"]
+    generation: int = Field(ge=0, le=9007199254740991)
+    sequence: int = Field(ge=0, le=9007199254740991)
+    enabled: bool
+    pcm: str | None = Field(default=None, max_length=4268)
+
+    @model_validator(mode="after")
+    def valid_pcm(self) -> InputMicrophoneMessage:
+        if self.pcm is not None:
+            try:
+                raw = base64.b64decode(self.pcm, validate=True)
+            except (ValueError, binascii.Error):
+                raise ValueError("Invalid PCM") from None
+            if not self.enabled or not raw or len(raw) % 2 or len(raw) > 3200:
+                raise ValueError("Invalid PCM")
+        return self
 
 
 class ErrorMessage(BaseModel):
@@ -76,18 +115,18 @@ class ErrorMessage(BaseModel):
 
 
 InboundMessage = Annotated[
-    Union[SessionStartMessage, SessionEndMessage, InputAppendMessage],
+    Union[SessionStartMessage, SessionEndMessage, InputAppendMessage, InputTypedMessage, InputMicrophoneMessage],
     Field(discriminator="type"),
 ]
 
 _INBOUND_ADAPTER: TypeAdapter[
-    SessionStartMessage | SessionEndMessage | InputAppendMessage
+    SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage
 ] = TypeAdapter(InboundMessage)
 
 
 def parse_inbound(
     raw: str,
-) -> SessionStartMessage | SessionEndMessage | InputAppendMessage:
+) -> SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:

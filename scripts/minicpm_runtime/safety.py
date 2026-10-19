@@ -198,8 +198,9 @@ def has_custom_voice(value):
 
 class PrivacyGate:
     """Allow only health and the integration's video WS; no upstream UI/uploads/debug."""
-    def __init__(self, app):
+    def __init__(self, app, speech_enabled=False):
         self.app = app
+        self.speech_enabled = speech_enabled
 
     async def __call__(self, scope, receive, send):
         kind, path = scope["type"], scope.get("path", "")
@@ -207,6 +208,14 @@ class PrivacyGate:
             return await self.app(scope, receive, send)
         if kind == "http" and path in {"/health", "/status"} and scope.get("method") == "GET":
             return await self.app(scope, receive, send)
+        if kind == "http" and self.speech_enabled:
+            import re
+            method = scope.get("method")
+            allowed = (method == "GET" and path == "/speech/v1/capabilities") or \
+                (method == "POST" and path in {"/speech/v1/sessions", "/speech/v1/tts", "/speech/v1/asr"}) or \
+                (method == "DELETE" and re.fullmatch(r"/speech/v1/sessions/[A-Za-z0-9_-]{1,64}", path))
+            if allowed:
+                return await self.app(scope, receive, send)
         if kind == "websocket":
             query = parse_qs(scope.get("query_string", b"").decode("ascii", errors="replace"))
             if path == "/v1/realtime" and query.get("mode", ["video"]) == ["video"]:

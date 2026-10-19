@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "asr_revision": "Systran/faster-whisper-base.en@3d3d5dee26484f91867d81cb899cfcf72b96be6c",
+  "voice_revision": "rhasspy/piper-voices@bae641dcb5a608cff81ccaf7ff018baaca1a33e1",
+  "files": {
+    "asr/model.bin": {"sha256": "2a166925539a16005f14ff328359f9b9adb9dc4fb631bb3b227526862e93e2ef"},
+    "asr/config.json": {"git_blob": "594369787efe617005d199b03739ee0ead7e3ab7"},
+    "asr/tokenizer.json": {"git_blob": "15d7bdf9ba25718ca2504eec6a8f02bc55af0a6a"},
+    "asr/vocabulary.txt": {"git_blob": "ee695b8d3e3c10d488304e04468efec4ca27554a"},
+    "voice/en_US-ljspeech-medium.onnx": {"sha256": "6f52a751e2349abe7a76735eb09dc1875298c77ea2342ffd2fef79ff81b87f22"},
+    "voice/en_US-ljspeech-medium.onnx.json": {"git_blob": "73ecdec4f6ab17a437936652dfe3a925bb19e098"},
+    "voice/MODEL_CARD": {"git_blob": "324d7470296a501e3c6396310f9b218fdbd7ed1e"}
+  }
+}

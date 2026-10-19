@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from collections.abc import Sequence
@@ -16,11 +17,13 @@ from .channel import ClientChannel, ClientSocket
 from .codecs import decode_jpeg_b64, decode_pcm_b64
 from .protocol import (
     InputAppendMessage,
+    InputTypedMessage,
+    InputMicrophoneMessage,
     SessionEndMessage,
     SessionStartMessage,
     parse_inbound,
 )
-from .types import ModelSpec, SessionError, VideoFrame
+from .types import ModelSpec, SessionError, VideoFrame, Reply
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +60,14 @@ class Session:
     feed_ready: asyncio.Event
     end_requested: bool = False
 
-    def ingest(self, feed: InputAppendMessage) -> None:
+    def ingest(self, feed: InputAppendMessage | InputTypedMessage | InputMicrophoneMessage) -> None:
+        if isinstance(feed, InputTypedMessage):
+            self.adapter.offer_typed(feed.text, feed.request_id)
+            return
+        if isinstance(feed, InputMicrophoneMessage):
+            self.adapter.offer_microphone(base64.b64decode(feed.pcm) if feed.pcm else b"",
+                generation=feed.generation, sequence=feed.sequence, enabled=feed.enabled)
+            return
         if feed.frame is not None and self.adapter.max_frames_per_request > 0:
             jpeg = decode_jpeg_b64(feed.frame)
             # Playground `t` is Unix milliseconds. Stamp omitted frames with
@@ -116,7 +126,7 @@ async def run_session(websocket: ClientSocket, catalog: SessionCatalog) -> None:
                 feed_ready=asyncio.Event(),
             )
             channel.adopt_session_id(session_id)
-            await channel.send_started(spec.id, config.model_dump())
+            await channel.send_started(spec.id, config.model_dump(), adapter.speech_capabilities())
             tasks = [
                 asyncio.create_task(_receiver(websocket, session, channel), name="receiver"),
                 asyncio.create_task(_feeder(session, channel), name="feeder"),
@@ -180,11 +190,11 @@ async def _read_start(
         except SessionError as exc:
             await channel.send_error(exc.message, fatal=False)
             continue
-        if isinstance(parsed, InputAppendMessage):
-            await channel.send_error("Feed before Start is ignored", fatal=False)
-            continue
         if isinstance(parsed, SessionEndMessage):
             raise ClientEnded
+        if not isinstance(parsed, SessionStartMessage):
+            await channel.send_error("Feed before Start is ignored", fatal=False)
+            continue
         return parsed
 
 
@@ -237,8 +247,11 @@ async def _feeder(session: Session, channel: ClientChannel) -> None:
 
 
 async def _forwarder(session: Session, channel: ClientChannel) -> None:
-    async for reply in session.adapter.read_replies():
-        await channel.send_reply(reply)
+    async for event in session.adapter.read_events():
+        if isinstance(event, Reply):
+            await channel.send_reply(event)
+        else:
+            await channel.send_input_event(event)
     raise SessionError("Model reply stream ended", fatal=True)
 
 

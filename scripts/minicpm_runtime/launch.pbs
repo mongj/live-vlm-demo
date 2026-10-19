@@ -21,12 +21,19 @@ if sys.version_info < (3, 10):
 root = Path(sys.argv[1])
 runtime = root / "runtime"
 hashes = {
-    "gateway_private.py": "1fdcc30f9e41e70784612f7099066589bac6d24c41e3be363ca0179d21225373",
-    "prepare.py": "3591c999e6dc0438525ccfdc4c4e2878beaf7c7a1fcce24915837c3b8779c443",
-    "run.py": "6a2fd390af4e2df0c93686a63b99a0b06428f3f6ed4e1c47b1f77f7f8eb0e594",
+    "gateway_private.py": "69da17f287a50f5fed3d1b766015380b62a4b333247e760b7700d51c8208e18e",
+    "prepare.py": "bc9086e5ed52101766fc26aac78603059f2e9196ce9db72e7f7edbafa5a10978",
+    "run.py": "9fda5094873030e4344bd15cdbfeebc79bd75c1f9cc84d239d3d52b8c71d0b74",
     "runtime.patch": "d73daa6be7a1da0a648811cdc727b8da0a30d691874d1bebc6c37a5c3f5affd8",
-    "safety.py": "ebbb943baa3db44f8488f3f47eee717c1572b7992c430f6d45a91289fdf65440",
-    "supervisor.py": "eb52e918cf633b8fe31fe5266203e1b58e24a5ada5eebd5f7f041218b0f4641b"
+    "safety.py": "b0301d470b5570c97e7c9340fbf3d53e5be4e903308650039a6a50e3ecddaee0",
+    "supervisor.py": "9d59b77548d14154519c4ebaa2f6a5e422699eb92f9fe27014224cfc1757be8e",
+    "speech_broker.py": "e3fd5469e44afcbe9b78f29d0e4e62e8765bf3ab6e9f0dc48df23cf324afc95f",
+    "speech_engines.py": "16b6da31266142dc2401e69a0c2a61be879bed002756d4118a52e21248b220ff",
+    "speech_routes.py": "9cca039bd592c4fbca2cdbca3bfb3c61a2c1f6589fb7f7d94cc73afbfbcfc049",
+    "speech_worker.py": "4b171111ae4506793e9255617a24dac68158343e660179ce26ff772536ee6f66",
+    "speech-assets.json": "3e681b30e7d4d85b5e79296fd3e28dcaae092e784cd42ec6894659135c383fe0",
+    "speech-requirements.in": "99cea7ba11db57602e0b45389c3179089e3823a8c8187220881d7284b10a2818",
+    "speech-requirements.lock": "a983f92ea61c5b1819b75ab7ff89afea9c38833f1102940c5a73de0117240e67"
 }
 # Check ownership before importing ANY code from the caller-supplied root.
 for path in (root, runtime, *runtime.glob("*.py")):

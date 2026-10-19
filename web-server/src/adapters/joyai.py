@@ -3,16 +3,21 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .base import Adapter
+from .minicpm_inputs import MicrophoneSegmenter, SegmentUpdate
 from ..buffers import AudioBuffer, FrameBuffer
+from ..input_events import AdapterEvent, InputStatus, InputTranscription, SpeechCapabilities
+from ..speech_client import SpeechClient
 from ..types import ModelSpec, Reply, SessionError, VideoFrame, make_session_id
 
 logger = logging.getLogger(__name__)
@@ -120,8 +125,20 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         self._query = ""
         self._http: httpx.AsyncClient | None = None
         self._http_transport = http_transport
-        self._replies: asyncio.Queue[Reply] = asyncio.Queue(maxsize=REPLY_QUEUE_SIZE)
+        self._replies: asyncio.Queue[AdapterEvent | None] = asyncio.Queue(maxsize=REPLY_QUEUE_SIZE)
         self._origin_unix_ms = 0.0
+        self._closing = False
+        self._speech: SpeechClient | None = None
+        self._speech_caps: SpeechCapabilities = {"version": 1, "transcription": False, "typed_input": True}
+        self._seen_requests: set[str] = set()
+        self._turn_order = self._query_order = 0
+        self._segmenter = MicrophoneSegmenter()  # type: ignore[no-untyped-call]
+        self._mic_sequence = -1
+        self._min_mic_generation = 0
+        self._asr_epoch = 0
+        self._voice_orders: dict[str, int] = {}
+        self._asr_pending: tuple[SegmentUpdate, int, int, int] | None = None
+        self._asr_task: asyncio.Task[None] | None = None
 
     def _session_headers(self) -> dict[str, str]:
         return {
@@ -152,11 +169,38 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         except httpx.HTTPStatusError as exc:
             raise SessionError(f"JoyAI open failed: {exc}", fatal=True) from exc
         self._origin_unix_ms = time.time() * 1000.0
+        self._closing = False
+        speech_url = os.environ.get("JOYAI_SPEECH_BASE_URL")
+        token_path = os.environ.get("MINICPM_SPEECH_TOKEN_FILE")
+        if speech_url and token_path:
+            try:
+                self._speech = SpeechClient(speech_url, Path(token_path))
+                async with asyncio.timeout(1.5):
+                    capabilities = await self._speech.capabilities()
+                    if capabilities["transcription"]:
+                        await self._speech.open_session(self.session_id)
+                        self._speech_caps["transcription"] = True
+            except Exception:
+                # Optional ASR must not prevent native JoyAI text/video sessions.
+                self._speech_caps["reason"] = "Self-hosted transcription is unavailable"
+                await self._close_speech()
         return self.session_id
 
+    def speech_capabilities(self) -> SpeechCapabilities:
+        return self._speech_caps.copy()
+
+    def _next_order(self) -> int:
+        # Reserve the adjacent order for the reply to this input, so an older
+        # in-flight response cannot clear a newer user's caption.
+        self._turn_order += 2
+        return self._turn_order
+
     def offer_text(self, text: str) -> None:
+        self._accept_text(text, self._next_order())
+
+    def _accept_text(self, text: str, order: int) -> None:
         stripped = text.strip()
-        if not stripped:
+        if not stripped or self._closing:
             return
         # webinfer replaces current_query_text on every nonempty prompt.
         # Chat follow-ups must append so a standing task is not wiped by
@@ -166,6 +210,87 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         else:
             self._standing = stripped
         self._query = self._standing
+        self._query_order = order
+
+    def offer_typed(self, text: str, request_id: str) -> None:
+        if self._closing or self._http is None:
+            raise SessionError("JoyAI session is not open", fatal=False)
+        if not text.strip() or len(text) > 500:
+            raise SessionError("Use 1–500 characters for a typed instruction", fatal=False)
+        if request_id in self._seen_requests or len(self._seen_requests) >= 128:
+            raise SessionError("Typed instruction already submitted; start a new session if needed", fatal=False)
+        if self._replies.full():
+            raise SessionError("Input feedback is busy; try again", fatal=False)
+        self._seen_requests.add(request_id)
+        self._invalidate_asr()
+        self._min_mic_generation = self._segmenter.generation + 1
+        order = self._next_order()
+        self._accept_text(text, order)
+        self._replies.put_nowait(InputStatus(request_id, "typed", order, "waiting",
+                                            detail="Queued for the next video frame"))
+
+    def _invalidate_asr(self) -> None:
+        self._asr_epoch += 1
+        self._asr_pending = None
+        self._voice_orders.clear()
+        self._segmenter.reset(self._segmenter.generation)
+
+    def offer_microphone(self, pcm: bytes, *, generation: int, sequence: int, enabled: bool) -> None:
+        if self._closing or not self._speech_caps["transcription"]:
+            return
+        if generation < max(self._segmenter.generation, self._min_mic_generation):
+            return
+        if generation == self._segmenter.generation and sequence <= self._mic_sequence:
+            return
+        if generation > self._segmenter.generation or not enabled:
+            self._invalidate_asr()
+            self._segmenter.reset(generation)
+        self._mic_sequence = sequence
+        if not enabled or not pcm:
+            return
+        for update in self._segmenter.offer(pcm, generation=generation, sequence=sequence):
+            if update.revision == 0:
+                self._voice_orders[update.utterance_id] = self._next_order()
+                continue
+            order = self._voice_orders.get(update.utterance_id, self._turn_order)
+            if update.final:
+                self._voice_orders.pop(update.utterance_id, None)
+            if self._asr_pending is not None and self._asr_pending[0].final:
+                if update.final and not self._replies.full():
+                    self._replies.put_nowait(InputStatus(update.utterance_id, "voice", order, "failed", generation,
+                                                        "Transcription skipped: speech worker is busy"))
+                continue
+            self._asr_pending = (update, self._asr_epoch, generation, order)
+            if self._asr_task is None or self._asr_task.done():
+                self._asr_task = asyncio.create_task(self._transcribe(), name="joyai-transcription")
+
+    async def _transcribe(self) -> None:
+        # One active request and one pending update. Interims may be replaced;
+        # a queued final is never silently replaced by the next utterance.
+        while self._asr_pending is not None and not self._closing:
+            update, epoch, generation, order = self._asr_pending
+            self._asr_pending = None
+            try:
+                if not update.final and self._replies.qsize() >= 48:
+                    continue
+                await self._replies.put(InputStatus(update.utterance_id, "voice", order, "transcribing", generation))
+                speech = self._speech
+                if speech is None:
+                    return
+                text = await speech.transcribe(self.session_id, update.utterance_id, update.revision, update.pcm, update.final)
+                if epoch != self._asr_epoch or self._closing:
+                    continue
+                await self._replies.put(InputTranscription(update.utterance_id, generation, order, update.revision, text, update.final))
+                # A full event queue may suspend the put; recheck the epoch before
+                # accepting text so mute/typed input cannot resurrect old speech.
+                if update.final and epoch == self._asr_epoch and not self._closing:
+                    self._accept_text(text, order)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if epoch == self._asr_epoch and not self._closing:
+                    await self._replies.put(InputStatus(update.utterance_id, "voice", order, "failed", generation,
+                                                        "Transcription unavailable"))
 
     async def send_feed(self, frames: FrameBuffer, audio: AudioBuffer) -> bool:
         del audio
@@ -175,6 +300,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         # Send pending text once. Image-only turns keep webinfer's cached
         # query; resending the same prompt re-injects it every frame.
         query = self._query
+        order = self._query_order
         self._query = ""
         client = self._http
         if client is None:
@@ -190,25 +316,71 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
                 timeout=JOYAI_TURN_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            reply = replace(parse_joyai_reply(response.json()), t=batch[-1].t)
+            reply = replace(parse_joyai_reply(response.json()), t=batch[-1].t, turn_order=order + 1)
         except SessionError:
+            if not self._query and not self._closing:
+                self._query = query
             raise
         except (httpx.HTTPError, TimeoutError, ValueError) as exc:
+            if not self._query and not self._closing:
+                self._query = query
             raise SessionError(f"JoyAI turn failed: {exc}", fatal=False) from exc
         await self._replies.put(reply)
         return True
 
     async def read_replies(self) -> AsyncIterator[Reply]:
+        async for event in self.read_events():
+            if isinstance(event, Reply):
+                yield event
+
+    async def read_events(self) -> AsyncIterator[AdapterEvent]:
         while True:
-            yield await self._replies.get()
+            event = await self._replies.get()
+            if event is None:
+                return
+            yield event
+
+    async def _close_speech(self) -> None:
+        speech, self._speech = self._speech, None
+        self._speech_caps["transcription"] = False
+        if speech is not None:
+            try:
+                await asyncio.wait_for(speech.cancel_session(self.session_id), timeout=2)
+            except Exception:
+                pass
+            finally:
+                try:
+                    await asyncio.wait_for(speech.close(), timeout=1)
+                except Exception:
+                    pass
 
     async def close(self) -> None:
+        self._closing = True
+        self._invalidate_asr()
+        task, self._asr_task = self._asr_task, None
+        input_error: BaseException | None = None
+        try:
+            try:
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            finally:
+                await self._close_speech()
+        except BaseException as exc:
+            # Preserve cancellation while still releasing the model HTTP client.
+            input_error = exc
+        while not self._replies.empty():
+            self._replies.get_nowait()
+        self._replies.put_nowait(None)
+        self._seen_requests.clear()
         self._standing = ""
         self._query = ""
         self._origin_unix_ms = 0.0
         client = self._http
         session_id = self.session_id
         if client is None:
+            if input_error is not None:
+                raise input_error
             return
         reset_error: BaseException | None = None
         try:
@@ -232,5 +404,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
                 logger.exception("JoyAI HTTP client close failed")
             if isinstance(reset_error, asyncio.CancelledError):
                 raise reset_error
+            if input_error is not None:
+                raise input_error
             if reset_error is not None:
                 logger.warning("JoyAI reset during close failed: %s", reset_error)

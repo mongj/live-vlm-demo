@@ -2,7 +2,6 @@ import {
   BARGE_IN_RMS_THRESHOLD,
   BYTES_PER_SAMPLE,
   CAPTURE_CHUNK_SECONDS,
-  floatRms,
   floatToS16le,
   INBOUND_SAMPLE_RATE_HZ,
   resampleLinear,
@@ -36,6 +35,9 @@ const SCRIPT_PROCESSOR_BUFFER = 4096;
 const GAIN_SMOOTHING_SECONDS = 0.02;
 const MIX_CHANNEL = 0;
 const SPEECH_CHANNEL = 1;
+const SPEECH_WINDOW_SECONDS = 0.01;
+const SPEECH_ONSET_SECONDS = 0.2;
+const SPEECH_REARM_SECONDS = 0.3;
 
 // Channel 0 carries the mix that is sent; channel 1 carries microphones only, for barge-in.
 const CAPTURE_WORKLET = `
@@ -80,12 +82,21 @@ export class AudioMixer {
   private desired = new Map<string, MixerSource>();
   private connected = new Map<string, ConnectedSource>();
   private pending: Float32Array = new Float32Array(0);
+  private pendingMicrophone: Float32Array = new Float32Array(0);
+  private speechSources = new Map<string, MediaStream>();
+  private speechSampleRate = 0;
+  private speechWindowSamples = 0;
+  private speechWindowEnergy = 0;
+  private speechActiveSamples = 0;
+  private speechQuietSamples = 0;
+  private speechLatched = false;
   private workletUrl: string | null = null;
   private closed = false;
 
   constructor(
     private readonly onChunk: (pcm: Uint8Array) => void,
-    private readonly onSpeechStart?: () => void
+    private readonly onSpeechStart?: () => void,
+    private readonly onMicrophoneChunk?: (pcm: Uint8Array) => void
   ) {}
 
   async start(): Promise<void> {
@@ -129,6 +140,18 @@ export class AudioMixer {
   }
 
   setSources(sources: Map<string, MixerSource>): void {
+    this.pendingMicrophone = new Float32Array(0);
+    const microphones = new Map<string, MediaStream>();
+    for (const [id, source] of sources) {
+      if (source.kind === "microphone" && source.gain > 0 && hasLiveAudio(source.stream)) {
+        microphones.set(id, source.stream);
+      }
+    }
+    if (microphones.size !== this.speechSources.size ||
+        [...microphones].some(([id, stream]) => this.speechSources.get(id) !== stream)) {
+      this.resetSpeechOnset();
+    }
+    this.speechSources = microphones;
     this.desired = new Map(sources);
     this.reconcile();
   }
@@ -136,6 +159,9 @@ export class AudioMixer {
   stop(): void {
     this.closed = true;
     this.pending = new Float32Array(0);
+    this.pendingMicrophone = new Float32Array(0);
+    this.resetSpeechOnset();
+    this.speechSources.clear();
     for (const source of this.connected.values()) {
       source.input.disconnect();
       source.level.disconnect();
@@ -227,16 +253,73 @@ export class AudioMixer {
     return processor;
   }
 
+  private resetSpeechOnset(): void {
+    this.speechSampleRate = 0;
+    this.speechWindowSamples = 0;
+    this.speechWindowEnergy = 0;
+    this.speechActiveSamples = 0;
+    this.speechQuietSamples = 0;
+    this.speechLatched = false;
+  }
+
+  private detectSpeechOnset(speech: Float32Array, sampleRate: number): void {
+    if (this.speechSampleRate !== sampleRate) {
+      this.resetSpeechOnset();
+      this.speechSampleRate = sampleRate;
+    }
+    const windowSamples = Math.max(1, Math.round(sampleRate * SPEECH_WINDOW_SECONDS));
+    const onsetSamples = Math.ceil(sampleRate * SPEECH_ONSET_SECONDS);
+    const rearmSamples = Math.ceil(sampleRate * SPEECH_REARM_SECONDS);
+    // Fixed small windows prevent a short impulse in a large ScriptProcessor
+    // block from counting as sustained speech. Carry only energy/counts across
+    // callbacks; capture PCM is neither changed nor retained by this detector.
+    // Sustained speaker echo can still qualify; this is not echo cancellation.
+    for (let index = 0; index < speech.length; index += 1) {
+      const sample = speech[index];
+      this.speechWindowEnergy += sample * sample;
+      this.speechWindowSamples += 1;
+      if (this.speechWindowSamples < windowSamples) continue;
+      const rms = Math.sqrt(this.speechWindowEnergy / this.speechWindowSamples);
+      this.speechWindowEnergy = 0;
+      this.speechWindowSamples = 0;
+      if (rms >= BARGE_IN_RMS_THRESHOLD) {
+        this.speechQuietSamples = 0;
+        this.speechActiveSamples = Math.min(onsetSamples, this.speechActiveSamples + windowSamples);
+        if (!this.speechLatched && this.speechActiveSamples >= onsetSamples) {
+          this.speechLatched = true;
+          this.onSpeechStart?.();
+        }
+      } else {
+        this.speechActiveSamples = 0;
+        this.speechQuietSamples = Math.min(rearmSamples, this.speechQuietSamples + windowSamples);
+        if (this.speechQuietSamples >= rearmSamples) this.speechLatched = false;
+      }
+    }
+  }
+
   private handleSamples(mix: Float32Array, speech: Float32Array): void {
     const context = this.graph?.context;
     if (this.closed || !context || mix.length === 0) {
       return;
     }
-    if (this.onSpeechStart && floatRms(speech) >= BARGE_IN_RMS_THRESHOLD) {
-      this.onSpeechStart();
+    const micActive = [...this.connected.values()].some(source => source.kind === 'microphone' && source.gain > 0 && hasLiveAudio(source.stream));
+    if (micActive && speech.length > 0) {
+      if (this.onSpeechStart) this.detectSpeechOnset(speech, context.sampleRate);
+    } else {
+      this.resetSpeechOnset();
     }
     this.pending = concatFloat(this.pending, mix);
     const needed = Math.max(1, Math.round(context.sampleRate * CAPTURE_CHUNK_SECONDS));
+    if (this.onMicrophoneChunk && micActive) {
+      this.pendingMicrophone = concatFloat(this.pendingMicrophone, speech);
+      while (this.pendingMicrophone.length >= needed) {
+        const slice = this.pendingMicrophone.subarray(0, needed);
+        this.pendingMicrophone = this.pendingMicrophone.slice(needed);
+        this.onMicrophoneChunk(floatToS16le(resampleLinear(slice, context.sampleRate, INBOUND_SAMPLE_RATE_HZ)));
+      }
+    } else {
+      this.pendingMicrophone = new Float32Array(0);
+    }
     while (this.pending.length >= needed) {
       const slice = this.pending.subarray(0, needed);
       this.pending = this.pending.slice(needed);

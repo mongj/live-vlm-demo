@@ -7,7 +7,8 @@ from typing import Any, ClassVar, Generic, TypeVar, cast
 from pydantic import BaseModel
 
 from ..buffers import AudioBuffer, FrameBuffer
-from ..types import ModelSpec, Reply
+from ..types import ModelSpec, Reply, SessionError
+from ..input_events import AdapterEvent, SpeechCapabilities
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
 
@@ -23,6 +24,19 @@ class Adapter(ABC, Generic[ConfigT]):
     def __init__(self, spec: ModelSpec, raw_config: dict[str, Any]) -> None:
         self.spec = spec
         self.config = cast(ConfigT, self.config_model.model_validate(raw_config))
+
+    def speech_capabilities(self) -> SpeechCapabilities | None:
+        return None
+
+    def offer_typed(self, text: str, request_id: str) -> None:
+        raise SessionError("Typed speech is unavailable", fatal=False)
+
+    def offer_microphone(self, pcm: bytes, *, generation: int, sequence: int, enabled: bool) -> None:
+        raise SessionError("Input transcription is unavailable", fatal=False)
+
+    async def read_events(self) -> AsyncIterator[AdapterEvent]:
+        async for reply in self.read_replies():
+            yield reply
 
     @abstractmethod
     async def open(self) -> str: ...

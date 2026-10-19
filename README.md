@@ -122,7 +122,7 @@ make minicpm-status
 ```
 
 Wait for `RUNTIME_CAPACITY_READY` in the runtime logs, then run the printed tunnel
-command on the gateway host. Select **MiniCPM-o 4.5 (Live video)** in the app.
+command on the gateway host. Select **MiniCPM-o 4.5** in the app.
 The job requests one GPU for 45 minutes and may queue.
 
 Stop with `make minicpm-stop`; close the SSH tunnel separately. Keep
@@ -147,6 +147,46 @@ make minicpm-prepare
 
 Use that runtime path in `make minicpm-configure`. Preparation applies the
 bundled patches; it does not download weights or install dependencies.
+
+</details>
+
+<details>
+<summary>Optional voice captions and typed MiniCPM input</summary>
+
+Speech runs on the server CPU; browser clients need no speech installation.
+MiniCPM receives microphone audio directly. Faster-whisper adds captions, and
+Piper converts typed instructions into audio, including with the microphone off.
+
+1. Create a separate Python 3.12 environment, then run its Python with
+   `-m pip install --require-hashes -r scripts/minicpm_runtime/speech-requirements.lock`.
+   Download the files listed in
+   `scripts/minicpm_runtime/speech-assets.json` into its `asr/` and `voice/`
+   directories. Retain the dependency licences and voice model card.
+2. Create an account-owned token file (32–128 random ASCII characters, mode
+   `600`) and private `speech.json` with absolute paths:
+
+   ```json
+   {"python":"/absolute/speech-env/bin/python","assets":"/absolute/speech-assets","token_file":"/absolute/speech.token"}
+   ```
+
+3. Prepare a **new** runtime using the same paths from first-time setup:
+
+   ```bash
+   python3 scripts/minicpm_runtime/prepare.py prepare \
+     --archive "$MINICPM_SOURCE_ARCHIVE" --root "$MINICPM_RUNTIME_ROOT" \
+     --model "$MINICPM_MODEL_PATH" --python "$MINICPM_RUNTIME_PYTHON" \
+     --speech-config /absolute/speech.json
+   ```
+
+4. Configure that runtime with `make minicpm-configure`. Set
+   `MINICPM_SPEECH_TOKEN_FILE` in the gateway environment to a private copy of the
+   same token; restart the gateway and rebuild the client. Keep tokens and site
+   paths out of Git. Existing runtimes are not updated by pulling the repository.
+
+JoyAI can reuse the caption service with
+`JOYAI_SPEECH_BASE_URL=http://127.0.0.1:18006` on the gateway host. It sends final
+voice transcripts as text; typed JoyAI instructions go directly as text.
+Debug shows runtime metrics where available and playback/interruption counters.
 
 </details>
 

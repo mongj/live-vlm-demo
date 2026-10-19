@@ -1,3 +1,5 @@
+import { parseRuntimeDiagnostic, type RuntimeDiagnostic } from './runtime-diagnostics.mjs';
+
 export type SessionStartMessage = {
   type: "session.start";
   model: string;
@@ -17,13 +19,20 @@ export type InputAppendMessage = {
   t?: number | null;
 };
 
-export type ClientMessage = SessionStartMessage | SessionEndMessage | InputAppendMessage;
+export type InputTypedMessage = {type:"input.typed"; request_id:string; text:string};
+export type InputMicrophoneMessage = {type:"input.microphone"; generation:number; sequence:number; enabled:boolean; pcm?:string};
+export type SpeechCapabilities = {version:1; transcription:boolean; typed_input:boolean; reason?:string};
+export type InputTranscriptionMessage = {type:"input.transcription"; session_id:string; source:"voice"; utterance_id:string; generation:number; turn_order:number; revision:number; text:string; final:boolean};
+export type InputStatusMessage = {type:"input.status"; session_id:string; input_id:string; source:"voice"|"typed"; generation?:number; turn_order:number; state:"transcribing"|"preparing"|"sending"|"sent"|"waiting"|"failed"|"cancelled"; detail?:string};
+export type InputFeedbackEvent = InputTranscriptionMessage | InputStatusMessage | {type:"microphone";generation:number} | {type:"assistant";turn_order?:number} | {type:"typed";input_id:string;text:string;transport?:"speech"|"text"};
+export type ClientMessage = SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage;
 
 export type SessionStartedMessage = {
   type: "session.started";
   session_id: string;
   model: string;
   config: Record<string, unknown>;
+  speech?: SpeechCapabilities;
 };
 
 export type SessionEndedMessage = {
@@ -42,6 +51,8 @@ export type ResponseChunkMessage = {
   interrupted?: boolean;
   /** Echo of the last consumed `input.append` `t` (Unix ms), when known. */
   t?: number;
+  turn_order?: number;
+  diagnostic?: RuntimeDiagnostic;
 };
 
 export type ErrorMessage = {
@@ -51,7 +62,14 @@ export type ErrorMessage = {
   message: string;
 };
 
-export type ServerMessage = SessionStartedMessage | SessionEndedMessage | ResponseChunkMessage | ErrorMessage;
+export type ServerMessage = SessionStartedMessage | SessionEndedMessage | ResponseChunkMessage | ErrorMessage | InputTranscriptionMessage | InputStatusMessage;
+
+function isCounter(value:unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+function isId(value:unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -89,6 +107,9 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
         session_id: sessionId,
         model,
         config: value.config,
+        ...(isRecord(value.speech) && value.speech.version === 1 && typeof value.speech.transcription === 'boolean' && typeof value.speech.typed_input === 'boolean'
+          ? {speech:{version:1,transcription:value.speech.transcription,typed_input:value.speech.typed_input,
+            ...(typeof value.speech.reason === 'string' ? {reason:value.speech.reason} : {})} as SpeechCapabilities} : {}),
       };
     }
     case "session.ended": {
@@ -110,6 +131,7 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
       if (!sessionId || text === null || final === null || interrupted === null) {
         return null;
       }
+      const diagnostic = parseRuntimeDiagnostic(value.diagnostic);
       return {
         type: "response.chunk",
         session_id: sessionId,
@@ -119,7 +141,19 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
         final,
         interrupted,
         t: asUnixMs(value.t),
+        ...(isCounter(value.turn_order) ? {turn_order:value.turn_order} : {}),
+        ...(diagnostic ? {diagnostic} : {}),
       };
+    }
+    case "input.transcription": {
+      if (!asString(value.session_id) || value.source !== 'voice' || !isId(value.utterance_id) || !isCounter(value.generation) || !isCounter(value.turn_order) || !isCounter(value.revision) || typeof value.text !== 'string' || value.text.length > 8000 || typeof value.final !== 'boolean') return null;
+      return {type:value.type,session_id:value.session_id as string,source:'voice',utterance_id:value.utterance_id,generation:value.generation,turn_order:value.turn_order,revision:value.revision,text:value.text,final:value.final};
+    }
+    case "input.status": {
+      const states = ['transcribing','preparing','sending','sent','waiting','failed','cancelled'];
+      if (!asString(value.session_id) || !isId(value.input_id) || !['voice','typed'].includes(String(value.source)) || !isCounter(value.turn_order) || !states.includes(String(value.state)) || (value.source === 'voice' && !isCounter(value.generation))) return null;
+      return {type:value.type,session_id:value.session_id as string,input_id:value.input_id,source:value.source as 'voice'|'typed',turn_order:value.turn_order,state:value.state as InputStatusMessage['state'],
+        ...(isCounter(value.generation) ? {generation:value.generation} : {}),...(typeof value.detail === 'string' ? {detail:value.detail.slice(0,300)} : {})};
     }
     case "error": {
       const message = asString(value.message);

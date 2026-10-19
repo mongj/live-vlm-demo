@@ -21,6 +21,7 @@ type CameraWorkspaceProps = {
   sessionLive: boolean;
   fatalError: string | null;
   guidance: GuidanceState | null;
+  inputCaption?: {text:string;label:string;streaming:boolean} | null;
   sessionNotice: string | null;
   onFullscreenLayoutLock: (locked: boolean) => void;
   stageClassName?: string;
@@ -204,6 +205,7 @@ export function CameraWorkspace({
   sessionLive,
   fatalError,
   guidance,
+  inputCaption,
   sessionNotice,
   onFullscreenLayoutLock,
   stageClassName,
@@ -219,7 +221,7 @@ export function CameraWorkspace({
   const fullscreenControllerRef = useRef<ReturnType<typeof createStageFullscreen> | null>(null);
   const [fullscreen, setFullscreen] = useState<StageFullscreenState>({ mode: "inline", notice: null });
   const sessionStatus = videoSessionView(sessionLive, fatalError);
-  const guidanceDisplay = sessionStatus.error ? null : guidanceView(guidance, sessionLive, cameraView);
+  const guidanceDisplay = sessionStatus.error || !sessionLive || cameraView !== 'live' ? null : inputCaption ?? guidanceView(guidance, sessionLive, cameraView);
   const enlarged = fullscreen.mode !== "inline";
   const fullscreenLabel = fullscreen.mode === "expanded" ? "Close expanded video view" : enlarged ? "Exit video fullscreen" : "Enter video fullscreen";
 
@@ -321,8 +323,9 @@ export function CameraWorkspace({
           ) : null}
           {guidanceDisplay ? (
             <div
-              className="pointer-events-none absolute z-30 rounded-lg border border-white/20 bg-black/90 px-2 py-1.5 text-white shadow-lg"
+              className={cn("pointer-events-none absolute z-30 rounded-lg border border-white/20 px-2 py-1.5 text-white shadow-lg", inputCaption ? "bg-blue-950/95" : "bg-black/90")}
               data-slot="assistant-guidance"
+              data-speaker={inputCaption ? 'user' : 'assistant'}
               style={guidanceBoxStyle(fileActive)}
             >
               <p className="mb-0.5 text-[8px] font-medium tracking-wide text-white/70 uppercase">{guidanceDisplay.label}</p>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from collections.abc import MutableMapping
 from typing import Any, Protocol
 
@@ -13,6 +14,7 @@ from .protocol import (
     SessionStartedMessage,
 )
 from .types import Reply, SessionError
+from .input_events import InputStatus, InputTranscription, SpeechCapabilities
 
 ORDINARY_WRITE_TIMEOUT_SECONDS = 5.0
 TERMINAL_WRITE_TIMEOUT_SECONDS = 2.0
@@ -38,15 +40,26 @@ class ClientChannel:
     def adopt_session_id(self, session_id: str) -> None:
         self.session_id = session_id
 
-    async def send_started(self, model: str, config: dict[str, Any]) -> None:
+    async def send_started(self, model: str, config: dict[str, Any], speech: SpeechCapabilities | None = None) -> None:
         if self.session_id is None:
             raise SessionError("Session ID missing before acknowledgement", fatal=True)
         message = SessionStartedMessage(
             session_id=self.session_id,
             model=model,
             config=config,
+            speech=dict(speech) if speech is not None else None,
         )
-        await self._send(message.model_dump(), ORDINARY_WRITE_TIMEOUT_SECONDS)
+        payload = message.model_dump()
+        if speech is None:
+            payload.pop("speech")
+        await self._send(payload, ORDINARY_WRITE_TIMEOUT_SECONDS)
+
+    async def send_input_event(self, event: InputTranscription | InputStatus) -> None:
+        if self.session_id is None:
+            raise SessionError("Session ID missing before input feedback", fatal=True)
+        payload = {key: value for key, value in asdict(event).items() if value is not None}
+        payload["session_id"] = self.session_id
+        await self._send(payload, ORDINARY_WRITE_TIMEOUT_SECONDS)
 
     async def send_reply(self, reply: Reply) -> None:
         if self.session_id is None:
@@ -60,8 +73,14 @@ class ClientChannel:
             final=reply.final,
             interrupted=reply.interrupted,
             t=reply.t,
+            turn_order=reply.turn_order,
+            diagnostic=reply.diagnostic,
         )
         payload = message.model_dump()
+        if reply.diagnostic is None:
+            payload.pop("diagnostic", None)
+        if reply.turn_order is None:
+            payload.pop("turn_order")
         if reply.t is None:
             payload.pop("t", None)
         if not reply.interrupted:

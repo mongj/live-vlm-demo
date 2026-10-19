@@ -13,7 +13,11 @@ def main():
     os.chdir(source)
     sys.path.insert(0, str(source))
     import gateway
-    gateway.app.add_middleware(PrivacyGate)
+    speech = config.get("speech")
+    if speech:
+        from speech_routes import install, speech_socket
+        install(gateway.app, socket_path=speech_socket(config["root"], os.environ["PBS_JOBID"]), token_file=Path(speech["token_file"]))
+    gateway.app.add_middleware(PrivacyGate, speech_enabled=bool(speech))
     gateway.main()
 
 

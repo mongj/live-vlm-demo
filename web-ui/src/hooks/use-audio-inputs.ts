@@ -27,6 +27,8 @@ type AudioInputsOptions = {
   onChunk: (pcm: Uint8Array) => void;
   onSpeechStart: () => void;
   onPermissionGranted: () => void;
+  onMicrophoneChunk?: (pcm: Uint8Array) => void;
+  onMicrophoneReset?: () => void;
 };
 
 export type AudioInputsState = {
@@ -71,6 +73,8 @@ export function useAudioInputs({
   onChunk,
   onSpeechStart,
   onPermissionGranted,
+  onMicrophoneChunk,
+  onMicrophoneReset,
 }: AudioInputsOptions): AudioInputsState {
   const [enabled, setEnabled] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
@@ -84,10 +88,10 @@ export function useAudioInputs({
   const selectedRef = useRef(selectedMicrophoneIds);
   const microphonesRef = useRef<MicrophoneStreams>({});
   const mixerRef = useRef<AudioMixer | null>(null);
-  const callbacksRef = useRef({ onChunk, onSpeechStart, onPermissionGranted });
+  const callbacksRef = useRef({ onChunk, onSpeechStart, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset });
 
   useEffect(() => {
-    callbacksRef.current = { onChunk, onSpeechStart, onPermissionGranted };
+    callbacksRef.current = { onChunk, onSpeechStart, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset };
   });
 
   function updateMicrophones(next: MicrophoneStreams) {
@@ -96,6 +100,7 @@ export function useAudioInputs({
   }
 
   function releaseMicrophone(deviceId: string) {
+    callbacksRef.current.onMicrophoneReset?.();
     const stream = microphonesRef.current[deviceId];
     if (!stream) {
       return;
@@ -107,6 +112,7 @@ export function useAudioInputs({
   }
 
   function releaseAllMicrophones() {
+    callbacksRef.current.onMicrophoneReset?.();
     for (const stream of Object.values(microphonesRef.current)) {
       stopMediaStream(stream);
     }
@@ -182,6 +188,7 @@ export function useAudioInputs({
   }
 
   useEffect(() => {
+    callbacksRef.current.onMicrophoneReset?.();
     if (!capturing || !enabled) {
       mixerRef.current?.stop();
       mixerRef.current = null;
@@ -191,7 +198,8 @@ export function useAudioInputs({
     if (!mixer) {
       const created = new AudioMixer(
         (pcm) => callbacksRef.current.onChunk(pcm),
-        () => callbacksRef.current.onSpeechStart()
+        () => callbacksRef.current.onSpeechStart(),
+        (pcm) => callbacksRef.current.onMicrophoneChunk?.(pcm)
       );
       mixerRef.current = created;
       created.start().catch(() => {

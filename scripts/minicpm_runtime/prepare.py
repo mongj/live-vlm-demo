@@ -24,7 +24,9 @@ ARCHIVE_SHA256 = "7a13ab0db06e8c305973402dc60b6dc281cfaeaf7a9b95d7c8bcdf9ea3f3de
 PATCH_SHA256 = "d73daa6be7a1da0a648811cdc727b8da0a30d691874d1bebc6c37a5c3f5affd8"
 SOURCE_SHA256 = "3c0e90a8f906f9179d47a2ee56e02461890f3c29e4bc23d4ee2fc7e960c44586"
 HERE = Path(__file__).resolve().parent
-RUNTIME_FILES = ("prepare.py", "safety.py", "supervisor.py", "gateway_private.py", "run.py", "launch.pbs", "runtime.patch")
+RUNTIME_FILES = ("prepare.py", "safety.py", "supervisor.py", "gateway_private.py", "run.py", "launch.pbs", "runtime.patch",
+                 "speech_worker.py", "speech_engines.py", "speech_broker.py", "speech_routes.py",
+                 "speech-assets.json", "speech-requirements.in", "speech-requirements.lock")
 
 
 def sha(data):
@@ -189,7 +191,30 @@ def write_new(path, data):
         handle.write(data)
 
 
-def prepare(*, archive, root, model, python):
+def validate_speech_config(path):
+    if path is None:
+        return None
+    value = json.loads(regular_bytes(canonical(path, private=True)))
+    if not isinstance(value, dict) or set(value) != {"python", "assets", "token_file"}:
+        raise ValueError("Speech config requires python, assets and token_file paths")
+    return validate_speech_settings(value)
+
+
+def validate_speech_settings(value):
+    from speech_engines import verify_assets, SpeechFailure
+    from speech_routes import load_token
+    try:
+        python = validate_python(value["python"])
+        assets = canonical(value["assets"], directory=True)
+        token = canonical(value["token_file"], private=True)
+        load_token(token)
+        hashes = verify_assets(assets)
+    except (KeyError, SpeechFailure):
+        raise ValueError("Speech assets are unavailable or changed") from None
+    return {"python":python, "assets":str(assets), "token_file":str(token), "asset_hashes":hashes}
+
+
+def prepare(*, archive, root, model, python, speech_config=None):
     root = Path(root)
     if not root.is_absolute() or root.resolve() != root or root.exists() or root.is_symlink():
         raise ValueError("Runtime root must be a new absolute nonsymlink directory")
@@ -197,6 +222,7 @@ def prepare(*, archive, root, model, python):
     if root.is_relative_to(HERE.parent.parent):
         raise ValueError("Prepared runtime must stay outside the application repository")
     model, python = validate_model(model), validate_python(python)
+    speech = validate_speech_config(speech_config)
     files = patched_files(archive)
     runtime = {name: regular_bytes(HERE / name) for name in RUNTIME_FILES}
     # All external inputs are validated before the first output write. A failed
@@ -212,6 +238,8 @@ def prepare(*, archive, root, model, python):
     config = {"version": 1, "pin": PIN, "root": str(root), "source": str(root / "source"),
               "owner_uid": os.geteuid(), "model": model, "python": python,
               "runtime_hashes": {name: sha(data) for name, data in runtime.items()}}
+    if speech is not None:
+        config["speech"] = speech
     write_new(root / "runtime.json", encoded(config))
     return check(root)
 
@@ -225,6 +253,9 @@ def check(root):
         raise ValueError("Prepared runtime identity does not match its private root")
     validate_model(config["model"])
     validate_python(config["python"])
+    if "speech" in config:
+        if validate_speech_settings(config["speech"]) != config["speech"]:
+            raise ValueError("Prepared speech assets changed")
     hashes = {}
     canonical(root / "source", directory=True, private=True)
     for path in (root / "source").rglob("*"):
@@ -260,6 +291,7 @@ def main():
     creation = commands.add_parser("prepare")
     for name in ("archive", "root", "model", "python"):
         creation.add_argument("--" + name, required=True)
+    creation.add_argument("--speech-config")
     commands.add_parser("check").add_argument("--root", required=True)
     args = vars(parser.parse_args())
     command = args.pop("command")

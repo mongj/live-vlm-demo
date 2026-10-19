@@ -1,0 +1,6 @@
+# Separate CPU-only Python 3.12 environment. Do not install into MiniCPM's environment.
+faster-whisper==1.2.1
+piper-tts==1.8.0
+fastapi==0.141.1
+uvicorn==0.54.0
+scipy==1.17.1

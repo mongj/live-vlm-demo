@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
 
@@ -26,6 +27,8 @@ class Reply:
     final: bool = False
     interrupted: bool = False
     t: float | None = None
+    turn_order: int | None = None
+    diagnostic: dict[str, Any] | None = None
 
 
 class SessionError(Exception):

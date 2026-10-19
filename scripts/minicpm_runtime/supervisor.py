@@ -24,14 +24,15 @@ class StopRequested(Exception):
 
 
 class OwnedChild:
-    def __init__(self, name, process, log):
+    def __init__(self, name, process, log, required=True):
         self.name, self.process, self.log = name, process, log
+        self.required = required
         self.pidfd = None
 
 
 class RuntimeSupervisor:
     def __init__(self, *, source_dir, scripts_dir, model_path, log_dir, job_id,
-                 python=sys.executable, grace_seconds=10, kill_wait_seconds=5):
+                 python=sys.executable, grace_seconds=10, kill_wait_seconds=5, speech=None):
         self.source_dir, self.scripts_dir = Path(source_dir), Path(scripts_dir)
         self.model_path, self.log_dir = Path(model_path), Path(log_dir)
         self.job_id, self.python = job_id, python
@@ -39,6 +40,7 @@ class RuntimeSupervisor:
         self.children = []
         self.stop_signal = None
         self.closed = False
+        self.speech = speech
 
     def request_stop(self, signum, frame):
         self.stop_signal = signum
@@ -48,19 +50,19 @@ class RuntimeSupervisor:
             raise StopRequested(self.stop_signal)
         for child in self.children:
             status = child.process.poll()
-            if status is not None:
+            if status is not None and child.required:
                 raise RuntimeError(f"Owned {child.name} exited with status {status}; inspect its job log")
 
-    def start_child(self, name, command):
+    def start_child(self, name, command, *, env=None, required=True):
         self.ensure_running()
         log = (self.log_dir / f"{name}-{self.job_id}.log").open("wb")
         try:
             process = subprocess.Popen(command, cwd=self.source_dir, stdout=log,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
+                                       stderr=subprocess.STDOUT, start_new_session=True, env=env)
         except BaseException:
             log.close()
             raise
-        child = OwnedChild(name, process, log)
+        child = OwnedChild(name, process, log, required=required)
         self.children.append(child)
         # No poll/wait occurs between Popen and pidfd_open. With SIGCHLD default,
         # even an immediately exited child remains unreaped, preventing PID reuse.
@@ -141,6 +143,16 @@ class RuntimeSupervisor:
 
     def run(self):
         try:
+            speech = self.speech
+            if speech:
+                from speech_routes import speech_socket
+                environment = dict(os.environ)
+                environment.update(CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="2", MKL_NUM_THREADS="2",
+                    OPENBLAS_NUM_THREADS="2", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
+                    PYTHONPATH=str(self.scripts_dir))
+                self.start_child("speech", [speech["python"], str(self.scripts_dir / "speech_worker.py"),
+                    "--assets", speech["assets"], "--socket", str(speech_socket(self.scripts_dir.parent, self.job_id))],
+                    env=environment, required=False)
             # cuda:0 is the process-local ordinal after verified UUID masking.
             self.start_child("backend", [self.python, "-m", "py_backend.server", "--host", "127.0.0.1",
                 "--port", "22500", "--gpu-id", "0", "--model-path", str(self.model_path)])

@@ -74,7 +74,8 @@ def main():
         # Probe only after exact scheduler ownership/masking, before any model.
         subprocess.run([config["python"], "-c", 'import torch; assert torch.__version__.startswith("2.8.0"); assert torch.version.cuda == "12.8"; assert torch.cuda.is_available(); assert torch.cuda.device_count() == 1; print("Allocated visible GPU:", torch.cuda.get_device_name(0))'], check=True, timeout=60)
         runtime = RuntimeSupervisor(source_dir=source, scripts_dir=root / "runtime", model_path=config["model"],
-                                    log_dir=root / "logs", job_id=os.environ["PBS_JOBID"], python=config["python"])
+                                    log_dir=root / "logs", job_id=os.environ["PBS_JOBID"], python=config["python"],
+                                    **({"speech":config["speech"]} if config.get("speech") else {}))
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, runtime.request_stop)
         runtime.run()

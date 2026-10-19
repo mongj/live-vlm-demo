@@ -21,12 +21,17 @@ import {
   stopMediaStream,
 } from "@/lib/media-devices";
 import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
+import { emptyInputFeedback, reduceInputFeedback, type InputFeedback, type InputCaption } from "@/lib/input-feedback.mjs";
 import { updateGuidance, type GuidanceState } from "@/lib/assistant-guidance.mjs";
-import { encodePcmBase64, PcmPlayer } from "@/lib/pcm";
+import { decodePcmBase64, encodePcmBase64, PcmPlayer } from "@/lib/pcm";
+import { emptyPlaybackDiagnostics, recordPlaybackEvent, type PlaybackDiagnostics, type StopReason } from "@/lib/playback-diagnostics.mjs";
+import { appendRuntimeDiagnostic, type RuntimeDiagnosticEntry } from "@/lib/runtime-diagnostics.mjs";
 import {
   encodeClientMessage,
   inputTranscriptionFromRaw,
   parseServerMessage,
+  type SpeechCapabilities,
+  type InputFeedbackEvent,
 } from "@/lib/protocol";
 import { getVideoLibrary } from "@/lib/video-library/library";
 import type { VideoPlayback, VideoRecord } from "@/lib/video-library/types";
@@ -46,6 +51,10 @@ export type TranscriptMessage = {
   role: "user" | "assistant";
   text: string;
   streaming: boolean;
+  source?: "voice" | "typed";
+  status?: string;
+  statusDetail?: string;
+  turnOrder?: number;
 };
 
 export type DebugRawEntry = {
@@ -82,8 +91,14 @@ export type PlaygroundState = {
   devices: MediaDevicesState;
   messages: TranscriptMessage[];
   guidance: GuidanceState | null;
+  inputCaption: InputCaption | null;
+  inputStatus: string;
+  typedBusy: boolean;
+  speechCapabilities: SpeechCapabilities | null;
   sessionNotice: string | null;
   debugEntries: DebugRawEntry[];
+  playbackDiagnostics: PlaybackDiagnostics;
+  runtimeDiagnostics: RuntimeDiagnosticEntry[];
   isStreaming: boolean;
   sessionActive: boolean;
   canStart: boolean;
@@ -96,7 +111,7 @@ export type PlaygroundState = {
   reloadCatalog: () => void;
   start: () => Promise<void>;
   stop: () => void;
-  sendText: (text: string) => Promise<void>;
+  sendText: (text: string) => Promise<boolean>;
   /** Turns the chosen video input on or off; frames are only sent while it is on. */
   toggleVideo: () => void;
   selectCamera: (deviceId: string) => void;
@@ -150,6 +165,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const suppressInputBargeInRef = useRef(false);
   const stoppingRef = useRef(false);
   const endingRef = useRef<SessionEndWaiter | null>(null);
+  const feedbackRef = useRef<InputFeedback>(emptyInputFeedback());
+  const speechRef = useRef<SpeechCapabilities | null>(null);
+  const micGenerationRef = useRef(0);
+  const micSequenceRef = useRef(0);
+  const typedWaiterRef = useRef<{id:string;resolve:(sent:boolean)=>void;timer:ReturnType<typeof setTimeout>} | null>(null);
 
   const [catalogStatus, setCatalogStatus] = useState<"loading" | "ready" | "error">(
     initialCatalogError ? "error" : initialModels.length > 0 ? "ready" : "error"
@@ -180,8 +200,13 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [cameraOn, setCameraOn] = useState(false);
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [guidance, setGuidance] = useState<GuidanceState | null>(null);
+  const [inputFeedback, setInputFeedback] = useState<InputFeedback>(emptyInputFeedback);
+  const [speechCapabilities, setSpeechCapabilities] = useState<SpeechCapabilities | null>(null);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [debugEntries, setDebugEntries] = useState<DebugRawEntry[]>([]);
+  const [playbackDiagnostics, setPlaybackDiagnostics] = useState(emptyPlaybackDiagnostics);
+  const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnosticEntry[]>([]);
+  const runtimeDiagnosticsRef = useRef<RuntimeDiagnosticEntry[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
 
   const devices = useMediaDevices();
@@ -191,6 +216,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     onChunk: sendAudio,
     onSpeechStart: maybeBargeInFromMic,
     onPermissionGranted: devices.refresh,
+    onMicrophoneChunk: sendMicrophone,
+    onMicrophoneReset: resetMicrophone,
   });
   const outputDeviceId = audio.outputDeviceId;
   const outputDeviceIdRef = useRef(outputDeviceId);
@@ -354,11 +381,52 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     );
   }
 
+  function applyInputFeedback(event: InputFeedbackEvent) {
+    const next = reduceInputFeedback(feedbackRef.current, event);
+    if (next === feedbackRef.current) return;
+    feedbackRef.current = next;
+    setInputFeedback(next);
+    setMessages(current => {
+      const incoming = new Map(next.entries.map(entry => [entry.id, entry]));
+      const result = current.map(entry => incoming.get(entry.id) ?? entry);
+      const existing = new Set(current.map(entry => entry.id));
+      result.push(...next.entries.filter(entry => !existing.has(entry.id)));
+      return result.sort((a,b) => (a.turnOrder ?? 0) - (b.turnOrder ?? 0));
+    });
+  }
+
+  function resetMicrophone() {
+    micGenerationRef.current += 1;
+    micSequenceRef.current = 0;
+    if (!liveRef.current || !speechRef.current?.transcription) return;
+    applyInputFeedback({type:'microphone',generation:micGenerationRef.current});
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(encodeClientMessage({type:'input.microphone',generation:micGenerationRef.current,sequence:0,enabled:false}));
+  }
+
+  function sendMicrophone(pcm: Uint8Array) {
+    const socket = socketRef.current;
+    if (!liveRef.current || !speechRef.current?.transcription || feedbackRef.current.busy || socket?.readyState !== WebSocket.OPEN) return;
+    // A separate channel contains only already-enabled microphones, never video audio.
+    if (socket.bufferedAmount > 256_000) { resetMicrophone(); return; }
+    socket.send(encodeClientMessage({type:'input.microphone',generation:micGenerationRef.current,
+      sequence:++micSequenceRef.current,enabled:true,pcm:encodePcmBase64(pcm)}));
+  }
+
+  function finishTyped(sent: boolean) {
+    const pending = typedWaiterRef.current;
+    typedWaiterRef.current = null;
+    if (pending) { clearTimeout(pending.timer); pending.resolve(sent); }
+  }
+
   function replyPlaybackActive(): boolean {
     return assistantTurnOpenRef.current || Boolean(pcmPlayerRef.current?.isActive());
   }
 
-  function interruptPlayback() {
+  function interruptPlayback(reason: StopReason = 'typed') {
+    if (replyPlaybackActive()) {
+      setPlaybackDiagnostics((current) => recordPlaybackEvent(current, {type:'interrupt',reason}));
+    }
     const hadOpenTurn = assistantTurnOpenRef.current;
     setGuidance((current) => updateGuidance(current, { interrupted: true, final: !hadOpenTurn }));
     pcmPlayerRef.current?.stop();
@@ -370,11 +438,18 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
   function maybeBargeInFromMic() {
     if (replyPlaybackActive()) {
-      interruptPlayback();
+      interruptPlayback('microphone');
     }
   }
 
   function playReplyAudio(pcmBase64: string) {
+    try {
+      const bytes = decodePcmBase64(pcmBase64).byteLength;
+      const discarded = discardReplyAudioRef.current;
+      setPlaybackDiagnostics((current) => recordPlaybackEvent(current, {type:'audio',bytes,discarded}));
+    } catch {
+      // The player already ignores malformed PCM; do not count it as valid audio.
+    }
     if (discardReplyAudioRef.current) {
       return;
     }
@@ -406,6 +481,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function resetTransientState() {
+    finishTyped(false);
+    feedbackRef.current = emptyInputFeedback();
+    speechRef.current = null;
+    setInputFeedback(feedbackRef.current);
+    setSpeechCapabilities(null);
     liveRef.current = false;
     lastSentTRef.current = null;
     streamingAssistantIdRef.current = null;
@@ -532,7 +612,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
     switch (message.type) {
       case "session.started":
+        setPlaybackDiagnostics(emptyPlaybackDiagnostics());
         liveRef.current = true;
+        feedbackRef.current = {...emptyInputFeedback(message.session_id),generation:micGenerationRef.current};
+        setInputFeedback(feedbackRef.current);
+        speechRef.current = message.speech ?? null;
+        setSpeechCapabilities(speechRef.current);
         setSessionId(message.session_id);
         setPhase("live");
         setFatalError(null);
@@ -540,22 +625,48 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         startFrameLoop();
         void ensurePcmPlayer().resume();
         break;
+      case "input.transcription":
+      case "input.status": {
+        if (message.session_id !== feedbackRef.current.sessionId) break;
+        applyInputFeedback(message);
+        if (message.type === 'input.status' && message.input_id === typedWaiterRef.current?.id) {
+          if (message.state === 'waiting') { finishTyped(true); resetMicrophone(); }
+          if (message.state === 'failed' || message.state === 'cancelled') {
+            setRecoverableError(message.detail ?? 'Typed instruction was not sent');
+            finishTyped(false);
+            resetMicrophone();
+          }
+        }
+        break;
+      }
       case "response.chunk": {
+        if (message.session_id !== feedbackRef.current.sessionId) break;
+        if (message.diagnostic) {
+          const entries = appendRuntimeDiagnostic(runtimeDiagnosticsRef.current, message.diagnostic, Date.now());
+          if (entries !== runtimeDiagnosticsRef.current) {
+            runtimeDiagnosticsRef.current = entries;
+            setRuntimeDiagnostics(entries);
+            console.debug('[MiniCPM diagnostic]', message.diagnostic);
+          }
+          // Telemetry must not open/end a turn, clear captions or change playback.
+          if (!message.text && !message.raw && !message.audio && !message.final && !message.interrupted) break;
+        }
         const chunk = message.text ?? "";
         const presentable = hasPresentableText(chunk);
         const rawChunk = message.raw ?? "";
         const presentableRaw = hasRawOutput(rawChunk);
         const inputChunk = inputTranscriptionFromRaw(rawChunk);
         const presentableInput = hasPresentableText(inputChunk);
+        if (presentable && !discardReplyAudioRef.current) applyInputFeedback({type:'assistant',turn_order:message.turn_order});
 
         if (message.interrupted) {
-          interruptPlayback();
+          interruptPlayback('server');
         } else if (
           presentableInput &&
           replyPlaybackActive() &&
           !suppressInputBargeInRef.current
         ) {
-          interruptPlayback();
+          interruptPlayback('input-transcription');
         }
         if (presentableInput) {
           suppressInputBargeInRef.current = true;
@@ -617,7 +728,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
           streamingUserIdRef.current = null;
         }
 
-        if (presentable) {
+        // A streamed word boundary can arrive as its own whitespace-only chunk.
+        if (presentable || (chunk.length > 0 && streamingAssistantIdRef.current)) {
           const streamingId = streamingAssistantIdRef.current;
           if (streamingId) {
             setMessages((current) =>
@@ -641,6 +753,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
               {
                 id,
                 role: "assistant",
+                turnOrder: message.turn_order,
                 text: chunk,
                 streaming: !message.final,
               },
@@ -703,6 +816,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         break;
       }
       case "error":
+        if (typedWaiterRef.current) {
+          applyInputFeedback({type:'input.status',session_id:feedbackRef.current.sessionId ?? '',input_id:typedWaiterRef.current.id,
+            source:'typed',turn_order:feedbackRef.current.latestOrder,state:'failed',detail:message.message});
+          finishTyped(false);
+        }
         setGuidance((current) => updateGuidance(current, { failed: true, turnOpen: turnOpenOnReceipt }));
         if (message.fatal) {
           setFatalError(message.message);
@@ -976,6 +1094,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setGuidance(null);
     setSessionNotice(null);
     setDebugEntries([]);
+    runtimeDiagnosticsRef.current = [];
+    setRuntimeDiagnostics([]);
     setIsStreaming(false);
     setPhase("connecting");
 
@@ -1136,14 +1256,45 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   async function sendText(text: string) {
     const trimmed = text.trim();
     if (!trimmed) {
-      return;
+      return false;
     }
-    const inputPolicy = typedInputPolicy(selectedModelIdRef.current, liveRef.current);
+    const inputPolicy = typedInputPolicy(selectedModelIdRef.current, liveRef.current, speechRef.current, feedbackRef.current.busy);
     if (!inputPolicy.enabled) {
       setRecoverableError(inputPolicy.notice ?? "Start a Session before sending a message");
-      return;
+      return false;
+    }
+    const nativeJoyInput = selectedModelIdRef.current === 'joyai-vl' && speechRef.current?.typed_input === true;
+    if (selectedModelIdRef.current === 'minicpm-o-4-5' || nativeJoyInput) {
+      if (nativeJoyInput && !sourceLiveRef.current) {
+        setRecoverableError('Turn on the camera or choose a video before sending a JoyAI instruction');
+        return false;
+      }
+      if (Array.from(text).length > 500 || /[\uD800-\uDFFF]/u.test(text)) {
+        setRecoverableError('Use 1–500 characters for a typed instruction');
+        return false;
+      }
+      const socket = socketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) return false;
+      const id = crypto.randomUUID();
+      interruptPlayback();
+      resetMicrophone();
+      applyInputFeedback({type:'typed',input_id:id,text,transport:nativeJoyInput ? 'text' : 'speech'});
+      setRecoverableError(null);
+      const sent = new Promise<boolean>(resolve => {
+        const timer = setTimeout(() => {
+          if (typedWaiterRef.current?.id !== id) return;
+          finishTyped(false);
+          setFatalError('Typed instruction timed out. Start a new session before retrying.');
+          void endSession();
+        }, 70_000);
+        typedWaiterRef.current = {id,resolve,timer};
+      });
+      try { socket.send(encodeClientMessage({type:'input.typed',request_id:id,text})); }
+      catch { finishTyped(false); cleanupSession(); }
+      return sent;
     }
     interruptPlayback();
+    let accepted = false;
     await enqueueCapture(async () => {
       if (!liveRef.current) {
         setRecoverableError("Start a Session before sending a message");
@@ -1178,7 +1329,9 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         },
       ]);
       setRecoverableError(null);
+      accepted = true;
     });
+    return accepted;
   }
 
   useEffect(() => {
@@ -1233,8 +1386,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     devices,
     messages,
     guidance,
+    inputCaption: inputFeedback.caption,
+    inputStatus: inputFeedback.status,
+    typedBusy: inputFeedback.busy,
+    speechCapabilities,
     sessionNotice,
     debugEntries,
+    playbackDiagnostics,
+    runtimeDiagnostics,
     isStreaming,
     sessionActive,
     canStart: catalogStatus === "ready" && Boolean(selectedModel) && phase === "idle",

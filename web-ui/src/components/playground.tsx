@@ -144,6 +144,7 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       cameraView={playground.cameraView}
       fatalError={playground.fatalError}
       guidance={playground.guidance}
+      inputCaption={playground.inputCaption}
       onFullscreenLayoutLock={onFullscreenLayoutLock}
       sessionNotice={playground.sessionNotice}
       controlBar={
@@ -170,6 +171,9 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       isStreaming={playground.isStreaming}
       messages={playground.messages}
       modelId={playground.selectedModelId}
+      speechCapabilities={playground.speechCapabilities}
+      typedBusy={playground.typedBusy}
+      inputStatus={playground.inputStatus}
       onSend={playground.sendText}
       onToggleDebug={() => setDebugOpen((open) => !open)}
       recoverableError={playground.recoverableError}
@@ -180,6 +184,9 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
   const debug = (
     <DebugPanel
       entries={playground.debugEntries}
+      playback={playground.playbackDiagnostics}
+      diagnostics={playground.runtimeDiagnostics}
+      active={playground.phase === 'live'}
       onBack={isDesktop ? undefined : () => setDebugOpen(false)}
     />
   );
