@@ -98,9 +98,27 @@ export class PcmPlayer {
   private nextTime = 0;
   private leftover = new Uint8Array(0);
   private sources: AudioBufferSourceNode[] = [];
+  private readonly output: GainNode;
+  private muted = false;
+  private volume = 1;
 
   constructor() {
     this.context = new AudioContext();
+    this.output = this.context.createGain();
+    this.output.connect(this.context.destination);
+  }
+
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    this.output.gain.value = muted ? 0 : this.volume;
+    if (muted) this.stop();
+  }
+
+  setVolume(volume: number): void {
+    if (!Number.isFinite(volume)) return;
+    this.volume = Math.min(1, Math.max(0, volume));
+    this.output.gain.value = this.muted ? 0 : this.volume;
+    if (this.volume === 0) this.stop();
   }
 
   async resume(): Promise<void> {
@@ -114,6 +132,7 @@ export class PcmPlayer {
   }
 
   enqueue(pcmBase64: string): void {
+    if (this.muted || this.volume === 0) return;
     let bytes: Uint8Array;
     try {
       bytes = decodePcmBase64(pcmBase64);
@@ -134,7 +153,7 @@ export class PcmPlayer {
     buffer.getChannelData(0).set(floats);
     const source = this.context.createBufferSource();
     source.buffer = buffer;
-    source.connect(this.context.destination);
+    source.connect(this.output);
     const now = this.context.currentTime;
     if (this.nextTime < now) {
       this.nextTime = now;

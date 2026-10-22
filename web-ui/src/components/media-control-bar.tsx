@@ -1,5 +1,6 @@
 "use client";
 
+import { SessionActionButton } from "@/components/playground-config";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -34,12 +35,16 @@ import { supportsOutputSelection } from "@/lib/media-devices";
 import { cn } from "@/lib/utils";
 import { videoKey } from "@/lib/video-library/types";
 import {
+  CaptionsIcon,
+  CaptionsOffIcon,
   ChevronUpIcon,
   FilmIcon,
   MicIcon,
   MicOffIcon,
   VideoIcon,
   VideoOffIcon,
+  Volume2Icon,
+  VolumeXIcon,
 } from "lucide-react";
 import { useState, type ComponentProps, type ReactNode } from "react";
 
@@ -180,6 +185,13 @@ function AudioMenu({ playground }: { playground: PlaygroundState }) {
         <CaretButton label="Audio settings" open={open} />
       </PopoverTrigger>
       <PopoverContent align="start" className="w-80 gap-3 p-2" side="top" sideOffset={12}>
+        <div className="space-y-1 px-2 py-1">
+          <Label htmlFor="microphone-mode">Microphone mode</Label>
+          <Select value={audio.mode} onValueChange={value => audio.setMode(value as AudioInputsState['mode'])}>
+            <SelectTrigger id="microphone-mode" className="w-full"><SelectValue /></SelectTrigger>
+            <SelectContent><SelectItem value="always-listening">Always listening</SelectItem><SelectItem value="push-to-talk">Push to talk</SelectItem></SelectContent>
+          </Select>
+        </div>
         <div className="flex flex-col gap-1">
           <p className="px-2 pt-1 text-xs font-medium text-muted-foreground">Audio (input)</p>
           {devices.audioInputs.map((device) => (
@@ -304,7 +316,8 @@ function VideoMenu({
 export function MediaControlBar({ playground, videoLibrary, className }: MediaControlBarProps) {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const { audio, activeVideo, videoSource, cameraView, videoInput, lastLibraryVideo } = playground;
-  const audioLabel = audio.enabled ? "Turn audio off" : "Turn audio on";
+  const pushToTalk = audio.mode === 'push-to-talk';
+  const audioLabel = pushToTalk ? 'Hold to talk' : audio.enabled ? "Turn microphone off" : "Turn microphone on";
   const videoEngaged = isVideoEngaged(playground);
   const videoPending = videoEngaged && cameraView !== "live";
   const videoLabel = videoEngaged ? "Turn video off" : "Turn video on";
@@ -324,57 +337,132 @@ export function MediaControlBar({ playground, videoLibrary, className }: MediaCo
   return (
     <div className={cn("flex shrink-0 flex-col items-center gap-2", className)}>
       {audio.error ? <p className="px-4 text-center text-xs text-destructive">{audio.error}</p> : null}
-      <div
-        aria-label="Media controls"
-        className="flex items-center gap-3 rounded-full bg-background p-2 ring-1 ring-foreground/10"
-        role="toolbar"
-      >
-        <SplitControl label="Audio" menu={<AudioMenu playground={playground} />}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={audioLabel}
-                aria-pressed={audio.enabled}
-                className={ROUND_BUTTON_CLASS}
-                onClick={audio.toggle}
-                size="icon"
-                type="button"
-                variant={audio.enabled ? "secondary" : "destructive"}
-              >
-                {audio.pending ? <Spinner className="size-5" /> : audio.enabled ? <MicIcon /> : <MicOffIcon />}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{audioLabel}</TooltipContent>
-          </Tooltip>
-        </SplitControl>
-        <SplitControl
-          label="Video"
-          menu={
-            <VideoMenu
-              onBrowseLibrary={() => setLibraryOpen(true)}
-              playground={playground}
-              videoLibrary={videoLibrary}
-            />
-          }
+      <div className="grid w-fit justify-items-center gap-2">
+        <div
+          aria-label="Media controls"
+          className="flex items-center gap-3 rounded-full bg-background p-2 ring-1 ring-foreground/10"
+          role="toolbar"
         >
+          <SplitControl label="Audio" menu={<AudioMenu playground={playground} />}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={audioLabel}
+                  aria-pressed={pushToTalk ? audio.holding : audio.enabled}
+                  className={cn(ROUND_BUTTON_CLASS, pushToTalk && 'touch-none select-none bg-blue-600 text-white hover:bg-blue-700', pushToTalk && audio.holding && 'bg-white! text-blue-700!')}
+                  disabled={pushToTalk && playground.phase !== 'live'}
+                  onClick={pushToTalk ? undefined : audio.toggle}
+                  onPointerDown={event => {
+                    if (!pushToTalk || event.button !== 0) return;
+                    event.preventDefault();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    audio.beginHold();
+                  }}
+                  onPointerUp={event => {
+                    if (!pushToTalk) return;
+                    audio.endHold();
+                    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                  }}
+                  onPointerCancel={() => { if (pushToTalk) audio.cancelHold(); }}
+                  onLostPointerCapture={() => { if (pushToTalk && audio.holding) audio.cancelHold(); }}
+                  onBlur={() => { if (pushToTalk && audio.holding) audio.cancelHold(); }}
+                  onKeyDown={event => {
+                    if (!pushToTalk || ![' ', 'Enter'].includes(event.key)) return;
+                    event.preventDefault();
+                    if (!event.repeat) audio.beginHold();
+                  }}
+                  onKeyUp={event => {
+                    if (!pushToTalk || ![' ', 'Enter'].includes(event.key)) return;
+                    event.preventDefault();audio.endHold();
+                  }}
+                  size="icon"
+                  type="button"
+                  variant={pushToTalk || audio.enabled ? "secondary" : "destructive"}
+                >
+                  {audio.pending ? <Spinner className="size-5" /> : pushToTalk || audio.enabled ? <MicIcon /> : <MicOffIcon />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{audioLabel}</TooltipContent>
+            </Tooltip>
+          </SplitControl>
+          <SplitControl
+            label="Video"
+            menu={
+              <VideoMenu
+                onBrowseLibrary={() => setLibraryOpen(true)}
+                playground={playground}
+                videoLibrary={videoLibrary}
+              />
+            }
+          >
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={videoLabel}
+                  aria-pressed={videoEngaged}
+                  className={ROUND_BUTTON_CLASS}
+                  onClick={handleVideoToggle}
+                  size="icon"
+                  type="button"
+                  variant={videoEngaged ? "secondary" : "destructive"}
+                >
+                  {videoPending ? <Spinner className="size-5" /> : videoEngaged ? <VideoIcon /> : <VideoOffIcon />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{videoLabel}</TooltipContent>
+            </Tooltip>
+          </SplitControl>
+          <div className="flex items-center rounded-full bg-muted/60" role="group" aria-label="Model audio">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                aria-label={videoLabel}
-                aria-pressed={videoEngaged}
-                className={ROUND_BUTTON_CLASS}
-                onClick={handleVideoToggle}
+                aria-label={playground.modelMuted ? "Unmute model audio" : "Mute model audio"}
+                aria-pressed={playground.modelMuted}
+                className="shrink-0 rounded-full"
+                onClick={playground.toggleModelMuted}
                 size="icon"
                 type="button"
-                variant={videoEngaged ? "secondary" : "destructive"}
+                variant="secondary"
               >
-                {videoPending ? <Spinner className="size-5" /> : videoEngaged ? <VideoIcon /> : <VideoOffIcon />}
+                {playground.modelMuted ? <VolumeXIcon aria-hidden /> : <Volume2Icon aria-hidden />}
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{videoLabel}</TooltipContent>
+            <TooltipContent>{playground.modelMuted ? "Unmute model audio" : "Mute model audio"}</TooltipContent>
           </Tooltip>
-        </SplitControl>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button aria-label="Model volume" className="h-8 w-6 rounded-full" size="icon" type="button" variant="ghost">
+                <ChevronUpIcon className="size-3" aria-hidden />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent side="top" align="center" className="w-52 gap-3 p-3">
+              <div className="flex items-center justify-between text-xs">
+                <span>Model volume</span>
+                <span className="tabular-nums text-muted-foreground">{Math.round(playground.modelVolume * 100)}%</span>
+              </div>
+              <Slider aria-label="Model output volume" min={0} max={100} step={5}
+                value={[Math.round(playground.modelVolume * 100)]}
+                onValueChange={([value]) => playground.setModelVolume((value ?? 100) / 100)} />
+            </PopoverContent>
+          </Popover>
+          </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button aria-label={playground.captionsEnabled ? "Hide video captions" : "Show video captions"}
+                aria-pressed={playground.captionsEnabled} className="shrink-0 rounded-full"
+                onClick={playground.toggleCaptions} size="icon" type="button"
+                variant={playground.captionsEnabled ? "secondary" : "ghost"}>
+                {playground.captionsEnabled ? <CaptionsIcon aria-hidden /> : <CaptionsOffIcon aria-hidden />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{playground.captionsEnabled ? "Hide video captions" : "Show video captions"}</TooltipContent>
+          </Tooltip>
+        </div>
+        <SessionActionButton className="w-[90%]" playground={playground} />
       </div>
+      <p className="text-center text-xs text-muted-foreground" role="status">
+        {playground.sessionStatus}
+      </p>
       <VideoLibraryDialog
         activeVideoKey={fileActive && activeVideo ? videoKey(activeVideo) : null}
         library={videoLibrary}

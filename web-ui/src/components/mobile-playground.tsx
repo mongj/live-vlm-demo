@@ -1,6 +1,6 @@
 "use client";
 
-import { ModelSelector, SessionActionButton } from "@/components/playground-config";
+import { ModelSelector } from "@/components/playground-config";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { Separator } from "@/components/ui/separator";
 import type { PlaygroundState } from "@/hooks/use-playground";
@@ -32,7 +32,6 @@ export function MobilePlayground({
             showRetry={false}
           />
         </div>
-        <SessionActionButton className="shrink-0" playground={playground} />
         <SettingsDialog playground={playground} />
       </header>
       <Separator />

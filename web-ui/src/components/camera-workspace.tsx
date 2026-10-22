@@ -22,6 +22,7 @@ type CameraWorkspaceProps = {
   fatalError: string | null;
   guidance: GuidanceState | null;
   inputCaption?: {text:string;label:string;streaming:boolean} | null;
+  captionsEnabled?: boolean;
   sessionNotice: string | null;
   onFullscreenLayoutLock: (locked: boolean) => void;
   stageClassName?: string;
@@ -206,6 +207,7 @@ export function CameraWorkspace({
   fatalError,
   guidance,
   inputCaption,
+  captionsEnabled = true,
   sessionNotice,
   onFullscreenLayoutLock,
   stageClassName,
@@ -215,6 +217,10 @@ export function CameraWorkspace({
   const overlay = overlayCopy(cameraView, cameraError, videoSource);
   const showVideo = showCameraVideo(cameraView);
   const fileActive = isFileSourceActive(videoSource);
+  const cameraTrack = previewStream?.getVideoTracks()[0];
+  // Mirror the self-view only; frame capture still reads the original pixels.
+  const mirrorPreview = videoSource === "camera" && cameraTrack != null &&
+    cameraTrack.getSettings().facingMode !== "environment";
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const [stageElement, setStageElement] = useState<HTMLDivElement | null>(null);
   const fullscreenButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -281,7 +287,7 @@ export function CameraWorkspace({
         >
           <video
             autoPlay
-            className={cn("absolute inset-0 size-full object-contain", !showVideo && "opacity-0")}
+            className={cn("absolute inset-0 size-full object-contain", mirrorPreview && "-scale-x-100", !showVideo && "opacity-0")}
             muted
             onError={() => {
               const video = localVideoRef.current;
@@ -321,7 +327,7 @@ export function CameraWorkspace({
               {fullscreen.notice}
             </p>
           ) : null}
-          {guidanceDisplay ? (
+          {captionsEnabled && guidanceDisplay ? (
             <div
               className={cn("pointer-events-none absolute z-30 rounded-lg border border-white/20 px-2 py-1.5 text-white shadow-lg", inputCaption ? "bg-blue-950/95" : "bg-black/90")}
               data-slot="assistant-guidance"

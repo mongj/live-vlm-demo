@@ -14,6 +14,7 @@ import type { CatalogModel } from "@/lib/catalog";
 import { releaseStageLayout } from "@/lib/stage-fullscreen.mjs";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { usePanelRef } from "react-resizable-panels";
 
 type PlaygroundProps = {
   initialModels: CatalogModel[];
@@ -25,31 +26,44 @@ function DesktopPlayground({
   camera,
   transcript,
   debug,
-  retainWideLayout,
 }: {
   playground: PlaygroundState;
   camera: ReactNode;
   transcript: ReactNode;
   debug: ReactNode | null;
-  retainWideLayout: boolean;
 }) {
-  // Match panel minimum widths plus the one-pixel separators.
+  const sidebarRef = usePanelRef();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Reserve expanded minimums even in a narrow desktop layout. Otherwise collapsed
+  // siblings can consume all available width and prevent the sidebar reopening.
   const minimumWidth = 240 + 320 + 280 + 2 + (debug ? 240 + 1 : 0);
   return (
     <ResizablePanelGroup
       className="h-full min-h-0"
       orientation="horizontal"
-      style={{ minWidth: retainWideLayout ? minimumWidth : undefined }}
+      style={{ minWidth: minimumWidth }}
     >
       <ResizablePanel
         className="min-h-0 min-w-0"
+        collapsedSize={48}
+        collapsible
         defaultSize={300}
         groupResizeBehavior="preserve-pixel-size"
         id="sidebar"
         maxSize={480}
         minSize={240}
+        onResize={({ inPixels }) => setSidebarCollapsed(inPixels < 49)}
+        panelRef={sidebarRef}
       >
-        <ModelSidebar playground={playground} />
+        <ModelSidebar
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => {
+            const panel = sidebarRef.current;
+            if (panel?.isCollapsed()) panel.expand();
+            else panel?.collapse();
+          }}
+          playground={playground}
+        />
       </ResizablePanel>
       <ResizableHandle withHandle />
       <ResizablePanel className="min-h-0 min-w-0" id="camera" minSize={320}>
@@ -145,6 +159,7 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       fatalError={playground.fatalError}
       guidance={playground.guidance}
       inputCaption={playground.inputCaption}
+      captionsEnabled={playground.captionsEnabled}
       onFullscreenLayoutLock={onFullscreenLayoutLock}
       sessionNotice={playground.sessionNotice}
       controlBar={
@@ -187,6 +202,11 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       playback={playground.playbackDiagnostics}
       diagnostics={playground.runtimeDiagnostics}
       active={playground.phase === 'live'}
+      frameRates={playground.frameRates}
+      targetFps={playground.framesPerSecond}
+      sessionLogSummary={playground.sessionLogSummary}
+      onMarkIssue={playground.markSessionIssue}
+      onDownloadLog={playground.downloadSessionLog}
       onBack={isDesktop ? undefined : () => setDebugOpen(false)}
     />
   );
@@ -195,7 +215,7 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
     <div
       aria-describedby={retainWideLayout ? "retained-layout-notice" : undefined}
       aria-label={retainWideLayout ? "Scrollable wide workspace" : undefined}
-      className={`flex h-svh flex-col overscroll-none bg-background text-foreground ${retainWideLayout ? "overflow-x-auto overflow-y-hidden" : "overflow-hidden"}`}
+      className={`flex h-svh flex-col overscroll-none bg-background text-foreground ${isDesktop ? "overflow-x-auto overflow-y-hidden" : "overflow-hidden"}`}
       role={retainWideLayout ? "region" : undefined}
       tabIndex={retainWideLayout ? 0 : undefined}
     >
@@ -209,7 +229,6 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
           camera={camera}
           debug={debugOpen ? debug : null}
           playground={playground}
-          retainWideLayout={retainWideLayout}
           transcript={transcript}
         />
       ) : (

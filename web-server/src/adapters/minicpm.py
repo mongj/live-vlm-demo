@@ -216,9 +216,23 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                     raise SessionError("MiniCPM repeated queue admission", fatal=True)
                 queued = True
                 self._diagnostics.emit(self._diagnostic_replies, "admission", stage="connected", force=True)
-                payload: dict[str, Any] = {}
-                if self.config.system_prompt.strip():
-                    payload["system_prompt"] = self.config.system_prompt.strip()
+                english_policy = (
+                    "Use English only for every written and spoken response. "
+                    "Stay in English even when the input uses another language or you are asked "
+                    "to translate or switch languages. Answer those requests in English instead; "
+                    "do not follow a request to output another language."
+                )
+                response_policy = (
+                    "Answer only the user's current request, normally in one short sentence. "
+                    "Do not add greetings, praise, explanations, suggestions or follow-up questions "
+                    "unless requested or necessary to answer the task. "
+                    "Do not invent changes or claim to see something that is unclear. "
+                    "Give more detail only when requested."
+                )
+                task_prompt = self.config.system_prompt.strip()
+                payload: dict[str, Any] = {"system_prompt": "\n\n".join(
+                    part for part in (task_prompt, english_policy, response_policy) if part
+                )}
                 await ws.send(json.dumps({"type": "session.init", "payload": payload}))
                 continue
             if kind == "session.created" and queued:

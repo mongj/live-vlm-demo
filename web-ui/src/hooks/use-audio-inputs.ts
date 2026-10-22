@@ -1,6 +1,7 @@
 "use client";
 
 import { AudioMixer, type MixerSource } from "@/lib/audio-mixer";
+import { readPreference, writePreference, type MicrophoneMode } from "@/lib/playground-preferences";
 import {
   assertSecureMediaContext,
   DEFAULT_DEVICE_ID,
@@ -32,6 +33,14 @@ type AudioInputsOptions = {
 };
 
 export type AudioInputsState = {
+  mode: MicrophoneMode;
+  holding: boolean;
+  listening: boolean;
+  setMode: (mode: MicrophoneMode) => void;
+  beginHold: () => void;
+  endHold: () => void;
+  cancelHold: () => void;
+  cancelCapture: () => void;
   enabled: boolean;
   pending: boolean;
   error: string | null;
@@ -77,6 +86,14 @@ export function useAudioInputs({
   onMicrophoneReset,
 }: AudioInputsOptions): AudioInputsState {
   const [enabled, setEnabled] = useState(false);
+  const [mode, setModeState] = useState<MicrophoneMode>("push-to-talk");
+  const [holding, setHolding] = useState(false);
+  const enabledRef = useRef(false);
+  const modeRef = useRef(mode);
+  const modePreferenceLoadedRef = useRef(false);
+  const holdingRef = useRef(false);
+  const capturingRef = useRef(capturing);
+  capturingRef.current = capturing;
   const [pendingCount, setPendingCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [selectedMicrophoneIds, setSelectedMicrophoneIds] = useState<string[]>([DEFAULT_DEVICE_ID]);
@@ -88,7 +105,18 @@ export function useAudioInputs({
   const selectedRef = useRef(selectedMicrophoneIds);
   const microphonesRef = useRef<MicrophoneStreams>({});
   const mixerRef = useRef<AudioMixer | null>(null);
+  const sourceSettingsRef = useRef({videoAudioStream, videoAudioSelected, gains});
+  sourceSettingsRef.current = {videoAudioStream, videoAudioSelected, gains};
   const callbacksRef = useRef({ onChunk, onSpeechStart, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset });
+
+  useEffect(() => {
+    if (modePreferenceLoadedRef.current) return;
+    modePreferenceLoadedRef.current = true;
+    const savedMode = readPreference("microphoneMode");
+    modeRef.current = savedMode;
+    // Hydrating a choice never arms the microphone or requests media permission.
+    setModeState(savedMode);
+  }, []);
 
   useEffect(() => {
     callbacksRef.current = { onChunk, onSpeechStart, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset };
@@ -100,19 +128,11 @@ export function useAudioInputs({
   }
 
   function releaseMicrophone(deviceId: string) {
-    callbacksRef.current.onMicrophoneReset?.();
-    const stream = microphonesRef.current[deviceId];
-    if (!stream) {
-      return;
-    }
-    stopMediaStream(stream);
-    const next = { ...microphonesRef.current };
-    delete next[deviceId];
-    updateMicrophones(next);
+    if (!microphonesRef.current[deviceId]) return;
+    cancelMicrophone();
   }
 
   function releaseAllMicrophones() {
-    callbacksRef.current.onMicrophoneReset?.();
     for (const stream of Object.values(microphonesRef.current)) {
       stopMediaStream(stream);
     }
@@ -130,6 +150,7 @@ export function useAudioInputs({
       });
       const stale =
         generation !== generationRef.current ||
+        !wantsMicrophone() ||
         !selectedRef.current.includes(deviceId) ||
         Boolean(microphonesRef.current[deviceId]);
       if (stale) {
@@ -157,17 +178,70 @@ export function useAudioInputs({
   function enable() {
     generationRef.current += 1;
     setEnabled(true);
+    enabledRef.current = true;
     setError(null);
-    for (const deviceId of selectedRef.current) {
-      void acquireMicrophone(deviceId);
-    }
+    if (wantsMicrophone()) for (const deviceId of selectedRef.current) void acquireMicrophone(deviceId);
   }
 
   function disable() {
     generationRef.current += 1;
     setEnabled(false);
+    enabledRef.current = false;
     setError(null);
+    cancelMicrophone();
+  }
+
+  function wantsMicrophone() {
+    return enabledRef.current && capturingRef.current &&
+      (modeRef.current === "always-listening" || holdingRef.current);
+  }
+
+  function detachMicrophones() {
+    const current = sourceSettingsRef.current;
+    const library = current.videoAudioSelected ? current.videoAudioStream : null;
+    mixerRef.current?.setSources(mixerSources({}, library, current.gains));
     releaseAllMicrophones();
+  }
+
+  function cancelMicrophone() {
+    generationRef.current += 1;
+    holdingRef.current = false;
+    setHolding(false);
+    callbacksRef.current.onMicrophoneReset?.();
+    detachMicrophones();
+  }
+
+  function beginHold() {
+    if (modeRef.current !== "push-to-talk" || !capturingRef.current || holdingRef.current) return;
+    // The press itself interrupts, before permission or a speech-onset decision.
+    callbacksRef.current.onSpeechStart();
+    holdingRef.current = true;
+    enabledRef.current = true;
+    setEnabled(true);
+    setHolding(true);
+    setError(null);
+    generationRef.current += 1;
+    for (const id of selectedRef.current) void acquireMicrophone(id);
+  }
+
+  function endHold() {
+    if (!holdingRef.current) return;
+    holdingRef.current = false;
+    setHolding(false);
+    generationRef.current += 1;
+    mixerRef.current?.finishMicrophone();
+    detachMicrophones();
+  }
+
+  function setMode(next: MicrophoneMode) {
+    if (next !== "always-listening" && next !== "push-to-talk") return;
+    if (next === modeRef.current) return;
+    modePreferenceLoadedRef.current = true;
+    writePreference("microphoneMode", next);
+    cancelMicrophone();
+    modeRef.current = next;
+    setModeState(next);
+    if (wantsMicrophone()) for (const id of selectedRef.current) void acquireMicrophone(id);
   }
 
   function toggleMicrophone(deviceId: string) {
@@ -177,25 +251,28 @@ export function useAudioInputs({
       : [...selectedRef.current, deviceId];
     selectedRef.current = next;
     setSelectedMicrophoneIds(next);
-    if (!enabled) {
+    cancelMicrophone();
+    if (!wantsMicrophone()) {
       return;
     }
-    if (selected) {
-      releaseMicrophone(deviceId);
-    } else {
-      void acquireMicrophone(deviceId);
-    }
+    for (const id of next) void acquireMicrophone(id);
   }
 
+  /* eslint-disable react-hooks/set-state-in-effect -- session capture lifecycle must publish stopped hardware state */
   useEffect(() => {
-    callbacksRef.current.onMicrophoneReset?.();
-    if (!capturing || !enabled) {
+    if (!capturing) {
+      generationRef.current += 1;
+      holdingRef.current = false;
+      setHolding(false);
+      callbacksRef.current.onMicrophoneReset?.();
+      for (const stream of Object.values(microphonesRef.current)) stopMediaStream(stream);
+      microphonesRef.current = {};
+      setMicrophones({});
       mixerRef.current?.stop();
       mixerRef.current = null;
       return;
     }
-    let mixer = mixerRef.current;
-    if (!mixer) {
+    if (!mixerRef.current) {
       const created = new AudioMixer(
         (pcm) => callbacksRef.current.onChunk(pcm),
         () => callbacksRef.current.onSpeechStart(),
@@ -207,10 +284,31 @@ export function useAudioInputs({
           setError("Audio capture could not start");
         }
       });
-      mixer = created;
     }
-    mixer.setSources(mixerSources(microphones, videoAudioSelected ? videoAudioStream : null, gains));
-  }, [capturing, enabled, microphones, videoAudioSelected, videoAudioStream, gains]);
+    if (enabledRef.current && modeRef.current === "always-listening") {
+      for (const id of selectedRef.current) if (!microphonesRef.current[id]) void acquireMicrophone(id);
+    }
+    // Source/gain changes do not cancel the ASR epoch, and library audio does
+    // not depend on whether a push-to-talk microphone is held.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- acquisition is tied to session transitions
+  }, [capturing]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  useEffect(() => {
+    mixerRef.current?.setSources(mixerSources(microphones, videoAudioSelected ? videoAudioStream : null, gains));
+  }, [microphones, videoAudioSelected, videoAudioStream, gains, capturing]);
+
+  useEffect(() => {
+    const cancel = () => { if (holdingRef.current) cancelMicrophone(); };
+    const hidden = () => { if (document.hidden) cancel(); };
+    window.addEventListener("blur", cancel);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("blur", cancel);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- handlers use current ownership refs
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -225,6 +323,14 @@ export function useAudioInputs({
   }, []);
 
   return {
+    mode,
+    holding,
+    listening: capturing && Object.keys(microphones).length > 0,
+    setMode,
+    beginHold,
+    endHold,
+    cancelHold: () => { if (holdingRef.current) cancelMicrophone(); },
+    cancelCapture: cancelMicrophone,
     enabled,
     pending: pendingCount > 0,
     error,

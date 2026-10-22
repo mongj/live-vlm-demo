@@ -145,7 +145,7 @@ export function ClientConfigSection({
   const { framesPerSecond, setFramesPerSecond } = playground;
 
   return (
-    <ConfigSection defaultOpen={false} subtitle="Applied to the camera or uploaded video" title="Client Configuration">
+    <ConfigSection subtitle="Applied to the camera or uploaded video" title="Client Configuration">
       <div className="flex min-w-0 flex-col gap-1.5 overflow-x-hidden px-4.5 pt-3.5 pb-4.5">
         <Label className="block truncate" htmlFor={id}>
           Frames Per Second
@@ -182,7 +182,7 @@ export function ServerConfigSection({
   const { sessionActive, serverAddress, setServerAddress, commitServerAddress } = playground;
 
   return (
-    <ConfigSection defaultOpen={false} subtitle="Used for Catalog and Session" title="Server Configuration">
+    <ConfigSection subtitle="Used for Catalog and Session" title="Server Configuration">
       <div className="flex min-w-0 flex-col gap-1.5 overflow-x-hidden px-4.5 pt-3.5 pb-4.5">
         <Label className="block truncate" htmlFor={id}>
           Server Address

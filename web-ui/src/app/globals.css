@@ -42,6 +42,9 @@
     --color-background: var(--background);
     --color-camera-stage: var(--camera-stage);
     --color-camera-preview: var(--camera-preview);
+    --color-debug-input: var(--debug-input);
+    --color-debug-output: var(--debug-output);
+    --color-debug-warning: var(--debug-warning);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -86,6 +89,9 @@
     --sidebar-ring: oklch(0.708 0 0);
     --camera-stage: oklch(0.97 0 0);
     --camera-preview: #FFFFFF;
+    --debug-input: #1d4ed8;
+    --debug-output: #0f766e;
+    --debug-warning: #92400e;
     --playground-mobile-transcript-line: 1.5rem;
     --playground-mobile-transcript-lines: 5;
     --playground-mobile-chat-height: calc(
@@ -133,6 +139,9 @@
     --sidebar-ring: oklch(0.556 0 0);
     --camera-stage: #191919;
     --camera-preview: oklch(0.269 0 0);
+    --debug-input: #93c5fd;
+    --debug-output: #5eead4;
+    --debug-warning: #fcd34d;
 }
 
 @layer base {

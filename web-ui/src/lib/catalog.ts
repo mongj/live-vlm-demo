@@ -7,6 +7,12 @@ export type CatalogModel = {
   config_schema: JsonSchema;
 };
 
+const MODEL_DISPLAY_ORDER = new Map([
+  ["joyai-vl", 0],
+  ["minicpm-o-4-5", 1],
+  ["gemini-3-8-live", 2],
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -41,7 +47,11 @@ async function readCatalog(url: string): Promise<CatalogModel[]> {
   if (models.length === 0) {
     throw new Error("Catalog did not return any models");
   }
-  return models;
+  return models.sort(
+    (left, right) =>
+      (MODEL_DISPLAY_ORDER.get(left.id) ?? MODEL_DISPLAY_ORDER.size) -
+      (MODEL_DISPLAY_ORDER.get(right.id) ?? MODEL_DISPLAY_ORDER.size)
+  );
 }
 
 export async function fetchCatalog(gatewayAddress?: string): Promise<CatalogModel[]> {

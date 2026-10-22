@@ -27,9 +27,32 @@ import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
 import type { SpeechCapabilities } from "@/lib/protocol";
 import { inputStatusLabels } from "@/lib/input-feedback.mjs";
 import { BugIcon, MessageSquareIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { useStickToBottomContext } from "use-stick-to-bottom";
 
 export type TranscriptDensity = "comfortable" | "compact";
+
+function TranscriptAutoScroll({ latestUserId, sessionActive }: { latestUserId?: string; sessionActive: boolean }) {
+  const { scrollToBottom, scrollRef, state } = useStickToBottomContext();
+
+  useEffect(() => {
+    // A new instruction resumes following after reading older messages.
+    if (sessionActive) void scrollToBottom({ animation: "instant" });
+  }, [latestUserId, sessionActive, scrollToBottom]);
+
+  useEffect(() => {
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    // Composer/status changes resize the viewport without resizing its content.
+    const observer = new ResizeObserver(() => {
+      if (state.isAtBottom) void scrollToBottom({ animation: "instant", preserveScrollPosition: true });
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [scrollRef, scrollToBottom, state]);
+
+  return null;
+}
 
 type TranscriptPanelProps = {
   modelId?: string;
@@ -253,6 +276,7 @@ export function TranscriptPanel({
         </Tooltip>
       </div>
       <Conversation className="min-h-0">
+        <TranscriptAutoScroll latestUserId={messages.findLast(message => message.role === "user")?.id} sessionActive={sessionActive} />
         <ConversationContent className={conversationContentClass(density)}>
           {messages.length === 0 ? (
             <ConversationEmptyState
@@ -281,7 +305,7 @@ export function TranscriptPanel({
             ))
           )}
         </ConversationContent>
-        <ConversationScrollButton />
+        <ConversationScrollButton aria-label="Scroll to latest message" title="Scroll to latest message" />
       </Conversation>
       <div className={composerWrapClass(density)}>{composer}</div>
     </aside>

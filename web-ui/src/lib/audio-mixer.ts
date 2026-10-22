@@ -91,6 +91,8 @@ export class AudioMixer {
   private speechQuietSamples = 0;
   private speechLatched = false;
   private workletUrl: string | null = null;
+  private captureGeneration = 0;
+  private captureKind: "worklet" | "script" | null = null;
   private closed = false;
 
   constructor(
@@ -108,12 +110,7 @@ export class AudioMixer {
     }
     const mixBus = context.createGain();
     const speechBus = context.createGain();
-    const limiter = context.createDynamicsCompressor();
-    limiter.threshold.value = -6;
-    limiter.knee.value = 3;
-    limiter.ratio.value = 20;
-    limiter.attack.value = 0.002;
-    limiter.release.value = 0.1;
+    const limiter = this.createLimiter(context);
     const merger = context.createChannelMerger(2);
     const silent = context.createGain();
     silent.gain.value = 0;
@@ -129,6 +126,7 @@ export class AudioMixer {
       if (this.closed) {
         return;
       }
+      this.captureKind = "script";
       graph.capture = this.createScriptProcessor(context);
     }
     if (this.closed) {
@@ -140,20 +138,46 @@ export class AudioMixer {
   }
 
   setSources(sources: Map<string, MixerSource>): void {
-    this.pendingMicrophone = new Float32Array(0);
     const microphones = new Map<string, MediaStream>();
     for (const [id, source] of sources) {
       if (source.kind === "microphone" && source.gain > 0 && hasLiveAudio(source.stream)) {
         microphones.set(id, source.stream);
       }
     }
-    if (microphones.size !== this.speechSources.size ||
-        [...microphones].some(([id, stream]) => this.speechSources.get(id) !== stream)) {
+    const microphoneChanged = microphones.size !== this.speechSources.size ||
+      [...microphones].some(([id, stream]) => this.speechSources.get(id) !== stream);
+    if (microphoneChanged) {
+      this.captureGeneration += 1;
+      this.pending = new Float32Array(0);
+      this.pendingMicrophone = new Float32Array(0);
       this.resetSpeechOnset();
     }
     this.speechSources = microphones;
     this.desired = new Map(sources);
     this.reconcile();
+    if (microphoneChanged) this.replaceCaptureGraph();
+  }
+
+  /** Drain held samples before disconnecting; silence finalizes the existing ASR epoch. */
+  finishMicrophone(): void {
+    const rate = this.graph?.context.sampleRate;
+    if (!rate || this.closed) return;
+    const needed = Math.max(1, Math.round(rate * CAPTURE_CHUNK_SECONDS));
+    if (this.pending.length) {
+      const padded = new Float32Array(needed);
+      padded.set(this.pending.subarray(0, needed));
+      this.pending = new Float32Array(0);
+      this.onChunk(floatToS16le(resampleLinear(padded, rate, INBOUND_SAMPLE_RATE_HZ)));
+    }
+    if (this.pendingMicrophone.length) {
+      const padded = new Float32Array(needed);
+      padded.set(this.pendingMicrophone.subarray(0, needed));
+      this.onMicrophoneChunk?.(floatToS16le(resampleLinear(padded, rate, INBOUND_SAMPLE_RATE_HZ)));
+    }
+    this.pendingMicrophone = new Float32Array(0);
+    for (let i = 0; i < 6; i += 1) {
+      this.onMicrophoneChunk?.(new Uint8Array(INBOUND_SAMPLE_RATE_HZ * CAPTURE_CHUNK_SECONDS * BYTES_PER_SAMPLE));
+    }
   }
 
   stop(): void {
@@ -170,7 +194,7 @@ export class AudioMixer {
     const graph = this.graph;
     this.graph = null;
     if (graph) {
-      graph.capture?.disconnect();
+      if (graph.capture) this.disconnectCapture(graph.capture);
       graph.merger.disconnect();
       if (graph.context.state !== "closed") {
         void graph.context.close();
@@ -180,6 +204,56 @@ export class AudioMixer {
       URL.revokeObjectURL(this.workletUrl);
       this.workletUrl = null;
     }
+  }
+
+  private createLimiter(context: AudioContext): DynamicsCompressorNode {
+    const limiter = context.createDynamicsCompressor();
+    limiter.threshold.value = -6;
+    limiter.knee.value = 3;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.1;
+    return limiter;
+  }
+
+  private disconnectCapture(capture: AudioNode): void {
+    capture.disconnect();
+    if ("port" in capture) {
+      const port = (capture as AudioWorkletNode).port;
+      port.onmessage = null;
+      port.close();
+    } else if ("onaudioprocess" in capture) {
+      (capture as ScriptProcessorNode).onaudioprocess = null;
+    }
+  }
+
+  /** Old nodes retain their immutable generation, even if their callbacks were already queued. */
+  private replaceCaptureGraph(): void {
+    const graph = this.graph;
+    if (!graph?.capture || !this.captureKind || this.closed) return;
+    let capture: AudioNode;
+    try {
+      capture = this.captureKind === "worklet"
+        ? this.createWorkletCapture(graph.context) : this.createScriptProcessor(graph.context);
+    } catch {
+      this.captureKind = "script";
+      capture = this.createScriptProcessor(graph.context);
+    }
+    // A new limiter also drops its look-ahead buffer of pre-cancel microphone
+    // samples. Keep the context and library source nodes alive throughout.
+    graph.mixBus.disconnect();
+    graph.speechBus.disconnect();
+    graph.limiter.disconnect();
+    graph.merger.disconnect();
+    this.disconnectCapture(graph.capture);
+    graph.limiter = this.createLimiter(graph.context);
+    graph.merger = graph.context.createChannelMerger(2);
+    graph.capture = capture;
+    graph.mixBus.connect(graph.limiter);
+    graph.limiter.connect(graph.merger, 0, MIX_CHANNEL);
+    graph.speechBus.connect(graph.merger, 0, SPEECH_CHANNEL);
+    graph.merger.connect(capture);
+    capture.connect(graph.silent);
   }
 
   private reconcile(): void {
@@ -225,6 +299,12 @@ export class AudioMixer {
     const url = URL.createObjectURL(blob);
     this.workletUrl = url;
     await context.audioWorklet.addModule(url);
+    this.captureKind = "worklet";
+    return this.createWorkletCapture(context);
+  }
+
+  private createWorkletCapture(context: AudioContext): AudioNode {
+    const generation = this.captureGeneration;
     const node = new AudioWorkletNode(context, "pcm-mix-capture", {
       numberOfInputs: 1,
       numberOfOutputs: 1,
@@ -233,6 +313,7 @@ export class AudioMixer {
       channelInterpretation: "discrete",
     });
     node.port.onmessage = (event: MessageEvent<unknown>) => {
+      if (generation !== this.captureGeneration) return;
       const data = event.data;
       if (Array.isArray(data) && data[0] instanceof Float32Array && data[1] instanceof Float32Array) {
         this.handleSamples(data[0], data[1]);
@@ -242,10 +323,12 @@ export class AudioMixer {
   }
 
   private createScriptProcessor(context: AudioContext): AudioNode {
+    const generation = this.captureGeneration;
     const processor = context.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 2, 1);
     processor.channelCountMode = "explicit";
     processor.channelInterpretation = "discrete";
     processor.onaudioprocess = (event) => {
+      if (generation !== this.captureGeneration) return;
       const input = event.inputBuffer;
       const speech = input.numberOfChannels > SPEECH_CHANNEL ? input.getChannelData(SPEECH_CHANNEL) : new Float32Array(0);
       this.handleSamples(input.getChannelData(MIX_CHANNEL).slice(), speech);
@@ -299,7 +382,7 @@ export class AudioMixer {
 
   private handleSamples(mix: Float32Array, speech: Float32Array): void {
     const context = this.graph?.context;
-    if (this.closed || !context || mix.length === 0) {
+    if (this.closed || !context || mix.length === 0 || this.connected.size === 0) {
       return;
     }
     const micActive = [...this.connected.values()].some(source => source.kind === 'microphone' && source.gain > 0 && hasLiveAudio(source.stream));
