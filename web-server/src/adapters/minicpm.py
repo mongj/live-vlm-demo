@@ -106,7 +106,7 @@ def _failure(event: dict[str, Any]) -> SessionError:
     if event["type"] == "session.closed":
         reason = event.get("reason")
         if reason == "timeout":
-            return SessionError("MiniCPM 300-second live-video session limit reached (timeout)", fatal=True)
+            return SessionError("MiniCPM live-video session time limit reached (timeout)", fatal=True)
         diagnostic = event.get("diagnostic")
         detail = diagnostic.get("message") if isinstance(diagnostic, dict) else None
         summary = reason if isinstance(reason, str) and reason else "unknown reason"

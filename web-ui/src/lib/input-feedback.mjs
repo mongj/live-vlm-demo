@@ -43,12 +43,13 @@ export function reduceInputFeedback(state, event) {
   if (event.type === 'input.transcription') {
     const previous = state.entries.find(e => e.id === event.utterance_id);
     if (previous && (previous.revision >= event.revision || !previous.streaming)) return state;
+    const noSpeech = event.final && !event.text.trim();
     const entry = {id:event.utterance_id,role:/** @type {'user'} */('user'),source:/** @type {'voice'} */('voice'),text:event.text,
-      streaming:!event.final,revision:event.revision,turnOrder:event.turn_order,status:event.final ? 'transcribed' : 'transcribing'};
+      streaming:!event.final,revision:event.revision,turnOrder:event.turn_order,status:noSpeech ? 'no_speech' : event.final ? 'transcribed' : 'transcribing'};
     const entries = previous ? state.entries.map(e => e.id === entry.id ? entry : e) : [...state.entries,entry];
     const newest = !state.pendingId && event.turn_order >= state.latestOrder;
     return {...state,entries,latestOrder:Math.max(state.latestOrder,event.turn_order),
-      status:newest ? (event.final ? 'Transcribed · waiting for a response' : inputStatusLabels.transcribing) : state.status,
+      status:newest ? (noSpeech ? 'No speech recognized for caption' : event.final ? 'Transcribed · waiting for a response' : inputStatusLabels.transcribing) : state.status,
       statusSource:newest ? 'voice' : state.statusSource,
       caption:newest && event.text.trim() ? {text:event.text,label:'You · voice',streaming:!event.final,turnOrder:event.turn_order,inputId:entry.id}
         : event.final && !event.text.trim() && state.caption?.inputId === entry.id ? null : state.caption};

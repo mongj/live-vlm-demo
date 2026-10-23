@@ -20,6 +20,13 @@ type DebugPanelProps = {
   frameRates: FrameRateSnapshot;
   targetFps: number;
   sessionLogSummary: PlaygroundState["sessionLogSummary"];
+  savedSessionLogs?: PlaygroundState["savedSessionLogs"];
+  savedLogDownloadStatus?: string;
+  includeTranscript?: boolean;
+  transcriptChoiceLocked?: boolean;
+  onIncludeTranscript?: (enabled:boolean) => void;
+  onDownloadSavedLog?: (startedAt:number) => void;
+  onClearSavedLogs?: () => void;
   onMarkIssue: () => void;
   onDownloadLog: () => void;
   onBack?: () => void;
@@ -74,7 +81,7 @@ function eventCategory(event: string): DebugCategory {
   }
 }
 
-export function DebugPanel({ entries, playback, diagnostics, active, frameRates, targetFps, sessionLogSummary, onMarkIssue, onDownloadLog, onBack }: DebugPanelProps) {
+export function DebugPanel({ entries, playback, diagnostics, active, frameRates, targetFps, sessionLogSummary, savedSessionLogs, savedLogDownloadStatus, includeTranscript, transcriptChoiceLocked, onIncludeTranscript, onDownloadSavedLog, onClearSavedLogs, onMarkIssue, onDownloadLog, onBack }: DebugPanelProps) {
   const [filter, setFilter] = useState<DebugFilter>("all");
   const latest = diagnostics.at(-1)?.snapshot;
   const filteredDiagnostics = diagnostics.filter(entry => filter === "all" || eventCategory(entry.snapshot.event) === filter);
@@ -118,17 +125,48 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
           onClick={onMarkIssue} size="icon-sm" type="button" variant="ghost">
           <FlagIcon aria-hidden />
         </Button>
-        <Button aria-label="Download session log" title="Download session log" disabled={!sessionLogSummary}
+        <Button aria-label="Download current session log" title="Download current session log" disabled={!sessionLogSummary || sessionLogSummary.terminal}
           onClick={onDownloadLog} size="icon-sm" type="button" variant="ghost">
           <DownloadIcon aria-hidden />
         </Button>
       </div>
       <ScrollArea className="min-h-0 flex-1">
+        {savedSessionLogs ? (
+          <section aria-label="Saved session logs" className="border-b px-4 pb-3 text-xs text-muted-foreground">
+            <details>
+              <summary className="cursor-pointer py-1">Saved session logs · {savedSessionLogs.logs.length} of 2</summary>
+              <p>Latest two completed logs in this browser only. No audio or video. Downloads are manual.</p>
+              <label className="my-2 flex items-center gap-2">
+                <input type="checkbox" checked={includeTranscript ?? false} disabled={transcriptChoiceLocked} onChange={event=>onIncludeTranscript?.(event.target.checked)} />
+                Include transcript in session log
+              </label>
+              <p>Choose before starting. Saves displayed user/assistant text and timestamps locally; speech captions may be inaccurate.</p>
+              <p role="status" className="py-1 break-words">
+                {savedSessionLogs.storage === "loading" ? "Loading browser logs…"
+                  : savedSessionLogs.storage === "saving" ? "Updating browser storage…"
+                  : savedSessionLogs.storage === "memory" ? "Some logs are memory-only · browser storage could not save all logs; download before closing."
+                  : savedSessionLogs.storage === "clear_failed" ? "Cleared from memory · browser storage could not be cleared; retry before refreshing."
+                  : "Saved in this browser · same app origin; browser data may be cleared or evicted."}
+              </p>
+              {savedSessionLogs.logs.map(log=>(
+                <div key={log.startedAt} className="flex min-w-0 flex-wrap items-center justify-between gap-1 py-1">
+                  <div className="min-w-0 break-words">
+                    <time dateTime={new Date(log.startedAt).toISOString()}>{new Date(log.startedAt).toLocaleString()}</time>
+                    <p>{log.events.length} events · {log.issueCount} issues{log.transcriptEnabled ? " · transcript included" : " · no transcript"}{log.truncated || log.transcript?.truncated ? " · truncated" : ""}</p>
+                  </div>
+                  <Button aria-label={`Download session log from ${new Date(log.startedAt).toLocaleString()}`} onClick={()=>onDownloadSavedLog?.(log.startedAt)} size="sm" type="button" variant="outline">Download</Button>
+                </div>
+              ))}
+              <Button onClick={onClearSavedLogs} disabled={savedSessionLogs.storage === "loading"} size="sm" type="button" variant="outline" className="mt-1">Clear saved logs</Button>
+              {savedLogDownloadStatus ? <p role="status" className="mt-1 break-words">{savedLogDownloadStatus}</p> : null}
+            </details>
+          </section>
+        ) : null}
         {sessionLogSummary ? (
           <div className="border-b px-4 pb-3 text-xs text-muted-foreground">
             <details>
               <summary className="cursor-pointer py-1">Session log · {sessionLogSummary.eventCount} events · {sessionLogSummary.issueCount} issues</summary>
-              <p>{sessionLogSummary.terminal ? "Session ended" : "Current session"} · diagnostic events only; no media or transcript recording.</p>
+              <p>{sessionLogSummary.terminal ? "Session ended" : "Current session"} · {sessionLogSummary.transcriptEnabled ? "transcript included" : "diagnostics only"}; no audio or video recording.</p>
             </details>
             {sessionLogSummary.downloadStatus !== "Not downloaded" ? (
               <p className="break-words" role="status">{sessionLogSummary.downloadStatus}</p>

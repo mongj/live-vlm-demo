@@ -28,7 +28,8 @@ import { emptyPlaybackDiagnostics, recordPlaybackEvent, type PlaybackDiagnostics
 import { appendRuntimeDiagnostic, type RuntimeDiagnosticEntry } from "@/lib/runtime-diagnostics.mjs";
 import { FrameRates, type FrameRateSnapshot } from "@/lib/frame-rates";
 import { readPreference, writePreference } from "@/lib/playground-preferences";
-import { SessionEvidence, safeFailureReason, overloadRecoveryMessage, type EvidenceEvent, type EvidenceReason, type SessionLogSummary } from "@/lib/session-evidence";
+import { SessionEvidence, sessionLogFilename, sanitizeEvidenceSnapshot, safeFailureReason, overloadRecoveryMessage, type EvidenceEvent, type EvidenceReason, type SessionLogSummary } from "@/lib/session-evidence";
+import { SessionLogArchive, type SessionLogArchiveState } from "@/lib/session-log-archive";
 import { canUpdateSessionActivity, describeSessionStatus, type SessionConnection, type SessionActivity } from "@/lib/session-status";
 import {
   encodeClientMessage,
@@ -111,6 +112,12 @@ export type PlaygroundState = {
   sessionLogSummary: SessionLogSummary | null;
   markSessionIssue: () => void;
   downloadSessionLog: () => void;
+  savedSessionLogs: SessionLogArchiveState;
+  savedLogDownloadStatus: string;
+  includeTranscript: boolean;
+  setIncludeTranscript: (enabled:boolean) => void;
+  downloadSavedSessionLog: (startedAt:number) => void;
+  clearSavedSessionLogs: () => void;
   debugEntries: DebugRawEntry[];
   playbackDiagnostics: PlaybackDiagnostics;
   runtimeDiagnostics: RuntimeDiagnosticEntry[];
@@ -191,7 +198,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const lastAudibleVolumeRef = useRef(1);
   const captionsEnabledRef = useRef(true);
   const evidenceRef = useRef<SessionEvidence | null>(null);
-  const previousEvidenceRef = useRef<SessionEvidence | null>(null);
+  const archivedEvidenceRef = useRef(new WeakSet<SessionEvidence>());
+  const [savedSessionLogs,setSavedSessionLogs] = useState<SessionLogArchiveState>({logs:[],storage:"loading"});
+  const [savedLogDownloadStatus,setSavedLogDownloadStatus] = useState("");
+  const archiveRef = useRef<SessionLogArchive | null>(null);
+  const archiveMountedRef = useRef(false);
+  if (!archiveRef.current) archiveRef.current=new SessionLogArchive(undefined,()=>{
+    if (archiveMountedRef.current) setSavedSessionLogs(archiveRef.current!.state());
+  });
   const microphoneSentRef = useRef(false);
   const evidencePublishedAtRef = useRef(-Infinity);
   const [sessionLogSummary, setSessionLogSummary] = useState<SessionLogSummary | null>(null);
@@ -209,29 +223,50 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
   }
 
-  function downloadSessionLog() {
-    const log=evidenceRef.current ?? previousEvidenceRef.current;
-    if (!log) return;
+  function archiveCompletedEvidence(log:SessionEvidence) {
+    if (!log.summary().terminal || archivedEvidenceRef.current.has(log)) return;
+    archivedEvidenceRef.current.add(log);
+    void archiveRef.current?.save(log.snapshot());
+  }
+
+  function downloadEvidence(value:unknown):string {
+    const snapshot=sanitizeEvidenceSnapshot(value,false);
+    if (!snapshot) return "Download unavailable · retry manually";
     let url:string | null=null;
     let anchor:HTMLAnchorElement | null=null;
     try {
-      const previous=previousEvidenceRef.current;
-      const bundle={session:log.snapshot(),previousSession:previous && previous !== log ? previous.snapshot() : null};
+      const bundle={session:snapshot};
       url=URL.createObjectURL(new Blob([JSON.stringify(bundle)],{type:"application/json"}));
       anchor=document.createElement("a");
       anchor.href=url;
-      anchor.download=`session-diagnostics-${log.startedAt}.json`;
+      anchor.download=sessionLogFilename(snapshot.startedAt);
       anchor.hidden=true;
       document.body.appendChild(anchor);
       anchor.click();
-      log.setDownloadStatus("Download requested · check browser downloads");
+      return "Download requested · check browser downloads";
     } catch {
-      log.setDownloadStatus("Download unavailable · retry manually");
+      return "Download unavailable · retry manually";
     } finally {
       anchor?.remove();
       if (url) { const release=url; window.setTimeout(()=>URL.revokeObjectURL(release),1000); }
-      setSessionLogSummary(log.summary());
     }
+  }
+
+  function downloadSessionLog() {
+    const log=evidenceRef.current;
+    if (!log || log.summary().terminal) return;
+    log.setDownloadStatus(downloadEvidence(log.snapshot()) as Parameters<SessionEvidence["setDownloadStatus"]>[0]);
+    setSessionLogSummary(log.summary());
+  }
+
+  function downloadSavedSessionLog(startedAt:number) {
+    const log=archiveRef.current?.state().logs.find(item=>item.startedAt === startedAt);
+    if (log) setSavedLogDownloadStatus(downloadEvidence(log));
+  }
+
+  function clearSavedSessionLogs() {
+    setSavedLogDownloadStatus("");
+    void archiveRef.current?.clear();
   }
 
   function recordSessionFailure(reason:EvidenceReason, terminal=true) {
@@ -239,13 +274,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (!log) return;
     if (terminal) {
       log.finish(reason);
+      archiveCompletedEvidence(log);
       setSessionConnection("failed");
       setSessionActivity("idle");
     } else log.add("failure",{reason});
-    if (terminal && !log.autoDownloadAttempted) {
-      log.autoDownloadAttempted=true;
-      downloadSessionLog();
-    }
     setSessionLogSummary(log.summary());
   }
 
@@ -253,6 +285,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     const log=evidenceRef.current;
     if (!log) return;
     log.finish(reason);
+    archiveCompletedEvidence(log);
     setSessionLogSummary(log.summary());
     setSessionConnection(current=>current === "failed" ? current : "closed");
     setSessionActivity("idle");
@@ -289,7 +322,15 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [videoInput, setVideoInput] = useState<VideoInput>({ kind: "camera", deviceId: DEFAULT_DEVICE_ID });
   const [videoAudioStream, setVideoAudioStream] = useState<MediaStream | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
-  const [messages, setMessages] = useState<TranscriptMessage[]>([]);
+  const [messages, setMessagesState] = useState<TranscriptMessage[]>([]);
+  const messagesRef = useRef<TranscriptMessage[]>([]);
+  const [includeTranscript,setIncludeTranscript] = useState(false);
+  function setMessages(update:TranscriptMessage[]|((current:TranscriptMessage[])=>TranscriptMessage[])) {
+    const next=typeof update === "function" ? update(messagesRef.current) : update;
+    messagesRef.current=next;
+    evidenceRef.current?.captureTranscript(next);
+    setMessagesState(next);
+  }
   const [guidance, setGuidance] = useState<GuidanceState | null>(null);
   const [inputFeedback, setInputFeedback] = useState<InputFeedback>(emptyInputFeedback);
   const [speechCapabilities, setSpeechCapabilities] = useState<SpeechCapabilities | null>(null);
@@ -515,7 +556,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       const result = current.map(entry => incoming.get(entry.id) ?? entry);
       const existing = new Set(current.map(entry => entry.id));
       result.push(...next.entries.filter(entry => !existing.has(entry.id)));
-      return result.sort((a,b) => (a.turnOrder ?? 0) - (b.turnOrder ?? 0));
+      return result.filter(entry=>entry.status !== 'no_speech').sort((a,b) => (a.turnOrder ?? 0) - (b.turnOrder ?? 0));
     });
   }
 
@@ -791,7 +832,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
             if (message.state === "cancelled") setSessionActivity(current=>current === "responding" ? current : "idle");
           }
         } else {
-          recordEvidence("input_status",{source:"voice",inputId:message.utterance_id,state:"transcribing",final:message.final,revision:message.revision,turnOrder:message.turn_order,generation:message.generation,accepted:eligible});
+          recordEvidence("input_status",{source:"voice",inputId:message.utterance_id,state:"transcribing",final:message.final,revision:message.revision,turnOrder:message.turn_order,generation:message.generation,accepted:eligible,hasText:!!message.text.trim(),textChars:message.text.length});
           if (eligible && message.final && message.text.trim()) setSessionActivity(current=>current === "responding" ? current : "waiting");
         }
         applyInputFeedback(message);
@@ -1275,9 +1316,9 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     generationRef.current = generation;
     if (evidenceRef.current) {
       evidenceRef.current.finish("replaced");
-      previousEvidenceRef.current=evidenceRef.current;
+      archiveCompletedEvidence(evidenceRef.current);
     }
-    evidenceRef.current=new SessionEvidence(selectedModelIdRef.current);
+    evidenceRef.current=new SessionEvidence(selectedModelIdRef.current,Date.now(),performance.now(),undefined,includeTranscript);
     evidencePublishedAtRef.current=-Infinity;
     microphoneSentRef.current=false;
     recordEvidence("start");
@@ -1567,12 +1608,19 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   useEffect(() => {
+    archiveMountedRef.current=true;
+    void archiveRef.current?.load();
+    return ()=>{archiveMountedRef.current=false;};
+  }, []);
+
+  useEffect(() => {
     return () => {
       generationRef.current += 1;
       cameraRequestIdRef.current += 1;
       fileRequestIdRef.current += 1;
       endingRef.current?.reject(new Error("unmounted"));
       evidenceRef.current?.finish("unmounted");
+      if (evidenceRef.current) archiveCompletedEvidence(evidenceRef.current);
       cleanupSession();
       stopVideoPreview();
       clearFileSourceState();
@@ -1665,6 +1713,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     sessionLogSummary,
     markSessionIssue:()=>{ if (liveRef.current && !stoppingRef.current) recordEvidence("issue"); },
     downloadSessionLog,
+    savedSessionLogs,
+    includeTranscript,
+    setIncludeTranscript:(enabled:boolean)=>{if (phase === "idle") setIncludeTranscript(enabled);},
+    savedLogDownloadStatus,
+    downloadSavedSessionLog,
+    clearSavedSessionLogs,
     debugEntries,
     playbackDiagnostics,
     runtimeDiagnostics,

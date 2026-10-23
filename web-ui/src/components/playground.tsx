@@ -205,6 +205,13 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       frameRates={playground.frameRates}
       targetFps={playground.framesPerSecond}
       sessionLogSummary={playground.sessionLogSummary}
+      savedSessionLogs={playground.savedSessionLogs}
+      includeTranscript={playground.includeTranscript}
+      transcriptChoiceLocked={playground.phase !== "idle"}
+      onIncludeTranscript={playground.setIncludeTranscript}
+      savedLogDownloadStatus={playground.savedLogDownloadStatus}
+      onDownloadSavedLog={playground.downloadSavedSessionLog}
+      onClearSavedLogs={playground.clearSavedSessionLogs}
       onMarkIssue={playground.markSessionIssue}
       onDownloadLog={playground.downloadSessionLog}
       onBack={isDesktop ? undefined : () => setDebugOpen(false)}
