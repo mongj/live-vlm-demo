@@ -5,6 +5,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -21,6 +22,9 @@ type SchemaFormProps = {
   schema: JsonSchema;
   values: Record<string, unknown>;
   disabled?: boolean;
+  disabledFields?: readonly string[];
+  errors?: Record<string, string>;
+  strictNumbers?: boolean;
   onChange: (key: string, value: unknown) => void;
 };
 
@@ -34,6 +38,8 @@ function SchemaField({
   root,
   value,
   disabled,
+  error,
+  strictNumbers,
   onChange,
 }: {
   name: string;
@@ -41,6 +47,8 @@ function SchemaField({
   root: JsonSchema;
   value: unknown;
   disabled?: boolean;
+  error?: string;
+  strictNumbers?: boolean;
   onChange: (key: string, value: unknown) => void;
 }) {
   const field = resolveSchema(schema, root);
@@ -117,11 +125,13 @@ function SchemaField({
             <SelectValue />
           </SelectTrigger>
           <SelectContent align="start" position="popper">
+            <SelectGroup>
             {enums.map((option) => (
               <SelectItem key={option} value={option}>
                 {option}
               </SelectItem>
             ))}
+            </SelectGroup>
           </SelectContent>
         </Select>
         {description ? (
@@ -132,13 +142,15 @@ function SchemaField({
   }
 
   if (type === "integer" || type === "number") {
-    const numeric = typeof value === "number" && Number.isFinite(value) ? value : (field.default as number | undefined) ?? field.minimum ?? 0;
+    const numeric = strictNumbers && typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? value : (field.default as number | undefined) ?? field.minimum ?? 0;
     return (
       <div className="min-w-0 space-y-1.5 overflow-visible">
         <Label className="block truncate" htmlFor={id}>
           {title}
         </Label>
         <Input
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? `${id}-error` : undefined}
           disabled={disabled}
           id={id}
           max={field.maximum}
@@ -146,17 +158,19 @@ function SchemaField({
           onChange={(event) => {
             const raw = event.target.value;
             if (raw === "") {
+              if (strictNumbers) onChange(name, "");
               return;
             }
-            const next = type === "integer" ? Number.parseInt(raw, 10) : Number.parseFloat(raw);
+            const next = strictNumbers ? Number(raw) : type === "integer" ? Number.parseInt(raw, 10) : Number.parseFloat(raw);
             if (Number.isFinite(next)) {
               onChange(name, next);
-            }
+            } else if (strictNumbers) onChange(name, raw);
           }}
           step={type === "integer" ? 1 : "any"}
           type="number"
           value={numeric}
         />
+        {error ? <p className="text-xs text-destructive" id={`${id}-error`}>{error}</p> : null}
         {description ? (
           <p className="text-xs wrap-break-word text-muted-foreground">{description}</p>
         ) : null}
@@ -187,7 +201,7 @@ function SchemaField({
   return null;
 }
 
-export function SchemaForm({ schema, values, disabled, onChange }: SchemaFormProps) {
+export function SchemaForm({ schema, values, disabled, disabledFields, errors, strictNumbers, onChange }: SchemaFormProps) {
   const resolved = resolveSchema(schema, schema);
   const properties = resolved.properties;
   if (!properties || Object.keys(properties).length === 0) {
@@ -198,7 +212,9 @@ export function SchemaForm({ schema, values, disabled, onChange }: SchemaFormPro
     <div className="min-w-0 space-y-4 overflow-visible">
       {Object.entries(properties).map(([name, fieldSchema]) => (
         <SchemaField
-          disabled={disabled}
+          disabled={disabled || disabledFields?.includes(name)}
+          error={errors?.[name]}
+          strictNumbers={strictNumbers}
           key={name}
           name={name}
           onChange={onChange}

@@ -32,6 +32,7 @@ import {
 import type { CameraViewState, PlaygroundState, VideoInput } from "@/hooks/use-playground";
 import type { VideoLibraryState } from "@/hooks/use-video-library";
 import { supportsOutputSelection } from "@/lib/media-devices";
+import type { CaptionSize } from "@/lib/playground-preferences";
 import { cn } from "@/lib/utils";
 import { videoKey } from "@/lib/video-library/types";
 import {
@@ -46,6 +47,7 @@ import {
   Volume2Icon,
   VolumeXIcon,
 } from "lucide-react";
+import { ToggleGroup } from "radix-ui";
 import { useState, type ComponentProps, type ReactNode } from "react";
 
 type MediaControlBarProps = {
@@ -57,6 +59,43 @@ type MediaControlBarProps = {
 const LIBRARY_RADIO_VALUE = "library";
 const CAMERA_RADIO_PREFIX = "camera:";
 const ROUND_BUTTON_CLASS = "size-12 rounded-full [&_svg:not([class*='size-'])]:size-5";
+const QUICK_MODELS = [
+  { id: "minicpm-o-4-5", label: "MiniCPM-o 4.5" },
+  { id: "joyai-vl", label: "JoyAI-VL" },
+];
+
+function QuickModelSwitch({ playground }: { playground: PlaygroundState }) {
+  const { models, selectedModelId, sessionActive, catalogStatus, setSelectedModelId } = playground;
+  const disabled = sessionActive || catalogStatus !== "ready"
+    || !QUICK_MODELS.some((model) => models.some((entry) => entry.id === model.id));
+
+  return (
+    <ToggleGroup.Root
+      aria-label="Model"
+      className="grid w-[72%] min-w-0 grid-cols-2 gap-0.5 rounded-full border border-border bg-muted/40 p-0.5"
+      disabled={disabled}
+      onValueChange={(id) => {
+        if (!disabled && id && id !== selectedModelId
+          && models.some((model) => model.id === id)) setSelectedModelId(id);
+      }}
+      orientation="horizontal"
+      title={sessionActive ? "Stop the session to change models" : "Select model"}
+      type="single"
+      value={selectedModelId}
+    >
+      {QUICK_MODELS.map((model) => (
+        <ToggleGroup.Item
+          className="min-h-6 min-w-0 rounded-full px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
+          disabled={disabled || !models.some((entry) => entry.id === model.id)}
+          key={model.id}
+          value={model.id}
+        >
+          {model.label}
+        </ToggleGroup.Item>
+      ))}
+    </ToggleGroup.Root>
+  );
+}
 
 function videoInputRadioValue(input: VideoInput): string {
   switch (input.kind) {
@@ -446,6 +485,7 @@ export function MediaControlBar({ playground, videoLibrary, className }: MediaCo
             </PopoverContent>
           </Popover>
           </div>
+          <div className="flex items-center rounded-full bg-muted/60" role="group" aria-label="Video captions">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button aria-label={playground.captionsEnabled ? "Hide video captions" : "Show video captions"}
@@ -457,8 +497,38 @@ export function MediaControlBar({ playground, videoLibrary, className }: MediaCo
             </TooltipTrigger>
             <TooltipContent>{playground.captionsEnabled ? "Hide video captions" : "Show video captions"}</TooltipContent>
           </Tooltip>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button aria-label="Caption settings" className="h-8 w-6 rounded-full" size="icon" type="button" variant="ghost">
+                <ChevronUpIcon className="size-3" aria-hidden />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent aria-label="Caption settings" side="top" align="end" className="w-60 gap-3 p-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs" htmlFor="caption-size">Caption size</Label>
+                <Select value={playground.captionSize} onValueChange={value => playground.setCaptionSize(value as CaptionSize)}>
+                  <SelectTrigger className="w-full" id="caption-size"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="compact">Compact</SelectItem>
+                    <SelectItem value="normal">Medium</SelectItem>
+                    <SelectItem value="large">Large</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span>Background opacity</span>
+                <span className="tabular-nums text-muted-foreground">{Math.round(playground.captionBackgroundOpacity * 100)}%</span>
+              </div>
+              <Slider aria-label="Caption background opacity" min={0} max={100} step={5}
+                value={[Math.round(playground.captionBackgroundOpacity * 100)]}
+                onValueChange={([value]) => { if (value !== undefined) playground.setCaptionBackgroundOpacity(value / 100); }} />
+              <Button onClick={playground.resetCaptionAppearance} size="sm" type="button" variant="outline">Reset defaults</Button>
+            </PopoverContent>
+          </Popover>
+          </div>
         </div>
         <SessionActionButton className="w-[90%]" playground={playground} />
+        <QuickModelSwitch playground={playground} />
       </div>
       <p className="text-center text-xs text-muted-foreground" role="status">
         {playground.sessionStatus}

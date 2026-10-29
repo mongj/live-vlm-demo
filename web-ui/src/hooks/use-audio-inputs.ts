@@ -27,6 +27,7 @@ type AudioInputsOptions = {
   videoAudioStream: MediaStream | null;
   onChunk: (pcm: Uint8Array) => void;
   onSpeechStart: () => void;
+  onSpeechEnd?: () => void;
   onPermissionGranted: () => void;
   onMicrophoneChunk?: (pcm: Uint8Array) => void;
   onMicrophoneReset?: () => void;
@@ -81,6 +82,7 @@ export function useAudioInputs({
   videoAudioStream,
   onChunk,
   onSpeechStart,
+  onSpeechEnd,
   onPermissionGranted,
   onMicrophoneChunk,
   onMicrophoneReset,
@@ -107,7 +109,7 @@ export function useAudioInputs({
   const mixerRef = useRef<AudioMixer | null>(null);
   const sourceSettingsRef = useRef({videoAudioStream, videoAudioSelected, gains});
   sourceSettingsRef.current = {videoAudioStream, videoAudioSelected, gains};
-  const callbacksRef = useRef({ onChunk, onSpeechStart, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset });
+  const callbacksRef = useRef({ onChunk, onSpeechStart, onSpeechEnd, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset });
 
   useEffect(() => {
     if (modePreferenceLoadedRef.current) return;
@@ -119,7 +121,7 @@ export function useAudioInputs({
   }, []);
 
   useEffect(() => {
-    callbacksRef.current = { onChunk, onSpeechStart, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset };
+    callbacksRef.current = { onChunk, onSpeechStart, onSpeechEnd, onPermissionGranted, onMicrophoneChunk, onMicrophoneReset };
   });
 
   function updateMicrophones(next: MicrophoneStreams) {
@@ -206,6 +208,7 @@ export function useAudioInputs({
   function cancelMicrophone() {
     generationRef.current += 1;
     holdingRef.current = false;
+    callbacksRef.current.onSpeechEnd?.();
     setHolding(false);
     callbacksRef.current.onMicrophoneReset?.();
     detachMicrophones();
@@ -227,6 +230,7 @@ export function useAudioInputs({
   function endHold() {
     if (!holdingRef.current) return;
     holdingRef.current = false;
+    callbacksRef.current.onSpeechEnd?.();
     setHolding(false);
     generationRef.current += 1;
     mixerRef.current?.finishMicrophone();
@@ -263,6 +267,7 @@ export function useAudioInputs({
     if (!capturing) {
       generationRef.current += 1;
       holdingRef.current = false;
+      callbacksRef.current.onSpeechEnd?.();
       setHolding(false);
       callbacksRef.current.onMicrophoneReset?.();
       for (const stream of Object.values(microphonesRef.current)) stopMediaStream(stream);
@@ -276,7 +281,8 @@ export function useAudioInputs({
       const created = new AudioMixer(
         (pcm) => callbacksRef.current.onChunk(pcm),
         () => callbacksRef.current.onSpeechStart(),
-        (pcm) => callbacksRef.current.onMicrophoneChunk?.(pcm)
+        (pcm) => callbacksRef.current.onMicrophoneChunk?.(pcm),
+        () => { if (!holdingRef.current) callbacksRef.current.onSpeechEnd?.(); }
       );
       mixerRef.current = created;
       created.start().catch(() => {
@@ -313,6 +319,8 @@ export function useAudioInputs({
   useEffect(() => {
     return () => {
       generationRef.current += 1;
+      holdingRef.current = false;
+      callbacksRef.current.onSpeechEnd?.();
       mixerRef.current?.stop();
       mixerRef.current = null;
       for (const stream of Object.values(microphonesRef.current)) {

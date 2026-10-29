@@ -14,7 +14,7 @@ import type { CatalogModel } from "@/lib/catalog";
 import { releaseStageLayout } from "@/lib/stage-fullscreen.mjs";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { usePanelRef } from "react-resizable-panels";
+import { useGroupRef, usePanelRef } from "react-resizable-panels";
 
 type PlaygroundProps = {
   initialModels: CatalogModel[];
@@ -32,14 +32,48 @@ function DesktopPlayground({
   transcript: ReactNode;
   debug: ReactNode | null;
 }) {
+  const groupElementRef = useRef<HTMLDivElement>(null);
+  const groupRef = useGroupRef();
   const sidebarRef = usePanelRef();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const debugRef = usePanelRef();
+  const debugWidthRef = useRef(320);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [debugHasWidth, setDebugHasWidth] = useState(false);
+  const debugOpen = debug !== null;
+
+  useEffect(() => {
+    const panel = debugRef.current;
+    const group = groupElementRef.current;
+    const sidebar = sidebarRef.current;
+    if (!panel || !group || !sidebar) return;
+
+    if (debugOpen) {
+      // Keep enough room for an expanded sidebar when opening a wide Debug pane.
+      const sidebarMinimum = sidebar.isCollapsed() ? 48 : 240;
+      const availableWidth = group.clientWidth - 3 - 320 - 280 - sidebarMinimum;
+      panel.resize(Math.max(240, Math.min(debugWidthRef.current, availableWidth)));
+    } else {
+      const width = panel.getSize().inPixels;
+      if (width > 0) debugWidthRef.current = width;
+      const layout = groupRef.current?.getLayout();
+      if (layout && layout.debug > 0) {
+        // Give the space to the flexible video pane, not the pixel-preserved
+        // transcript, so the later group shrink cannot squeeze Sidebar closed.
+        groupRef.current?.setLayout({ ...layout, camera: layout.camera + layout.debug, debug: 0 });
+      }
+    }
+  }, [debugOpen, debugRef, groupRef, sidebarRef]);
+
   // Reserve expanded minimums even in a narrow desktop layout. Otherwise collapsed
   // siblings can consume all available width and prevent the sidebar reopening.
-  const minimumWidth = 240 + 320 + 280 + 2 + (debug ? 240 + 1 : 0);
+  // Keep Debug's space until its collapse has actually completed. Shrinking the
+  // group first could force an expanded sidebar closed in a narrow workspace.
+  const minimumWidth = 240 + 320 + 280 + 2 + (debugOpen || debugHasWidth ? 240 + 1 : 0);
   return (
     <ResizablePanelGroup
       className="h-full min-h-0"
+      elementRef={groupElementRef}
+      groupRef={groupRef}
       orientation="horizontal"
       style={{ minWidth: minimumWidth }}
     >
@@ -47,7 +81,7 @@ function DesktopPlayground({
         className="min-h-0 min-w-0"
         collapsedSize={48}
         collapsible
-        defaultSize={300}
+        defaultSize={48}
         groupResizeBehavior="preserve-pixel-size"
         id="sidebar"
         maxSize={480}
@@ -80,21 +114,25 @@ function DesktopPlayground({
       >
         {transcript}
       </ResizablePanel>
-      {debug ? (
-        <>
-          <ResizableHandle withHandle />
-          <ResizablePanel
-            className="min-h-0 min-w-0"
-            defaultSize={320}
-            groupResizeBehavior="preserve-pixel-size"
-            id="debug"
-            maxSize={560}
-            minSize={240}
-          >
-            {debug}
-          </ResizablePanel>
-        </>
-      ) : null}
+      {debugOpen ? <ResizableHandle withHandle /> : null}
+      {/* Keep the panel IDs stable: adding/removing Debug would restore a separate
+          cached group layout, including an outdated sidebar collapse state. */}
+      <ResizablePanel
+        aria-hidden={!debugOpen}
+        className="min-h-0 min-w-0"
+        collapsedSize={0}
+        collapsible
+        defaultSize={0}
+        disabled={!debugOpen}
+        groupResizeBehavior="preserve-pixel-size"
+        id="debug"
+        maxSize={560}
+        minSize={240}
+        onResize={({ inPixels }) => setDebugHasWidth(inPixels > 0)}
+        panelRef={debugRef}
+      >
+        {debug}
+      </ResizablePanel>
     </ResizablePanelGroup>
   );
 }
@@ -160,8 +198,12 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       guidance={playground.guidance}
       inputCaption={playground.inputCaption}
       captionsEnabled={playground.captionsEnabled}
+      captionSize={playground.captionSize}
+      captionBackgroundOpacity={playground.captionBackgroundOpacity}
       onFullscreenLayoutLock={onFullscreenLayoutLock}
       sessionNotice={playground.sessionNotice}
+      sessionBadge={playground.sessionStatusBadge}
+      sessionStartedAtMonotonicMs={playground.sessionStartedAtMonotonicMs}
       controlBar={
         <MediaControlBar
           className={isDesktop ? "px-6 pb-6" : "px-3 pb-3"}
@@ -213,6 +255,8 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       onDownloadSavedLog={playground.downloadSavedSessionLog}
       onClearSavedLogs={playground.clearSavedSessionLogs}
       onMarkIssue={playground.markSessionIssue}
+      onMarkStateChange={playground.markSessionStateChange}
+      stateChangeShortcutHeld={playground.stateChangeShortcutHeld}
       onDownloadLog={playground.downloadSessionLog}
       onBack={isDesktop ? undefined : () => setDebugOpen(false)}
     />

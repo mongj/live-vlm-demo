@@ -21,7 +21,7 @@ export type InputAppendMessage = {
 
 export type InputTypedMessage = {type:"input.typed"; request_id:string; text:string};
 export type InputMicrophoneMessage = {type:"input.microphone"; generation:number; sequence:number; enabled:boolean; pcm?:string};
-export type SpeechCapabilities = {version:1; transcription:boolean; typed_input:boolean; reason?:string};
+export type SpeechCapabilities = {version:1; transcription:boolean; typed_input:boolean; spoken_interruption?:boolean; reason?:string};
 export type InputTranscriptionMessage = {type:"input.transcription"; session_id:string; source:"voice"; utterance_id:string; generation:number; turn_order:number; revision:number; text:string; final:boolean};
 export type InputStatusMessage = {type:"input.status"; session_id:string; input_id:string; source:"voice"|"typed"; generation?:number; turn_order:number; state:"transcribing"|"preparing"|"sending"|"sent"|"waiting"|"failed"|"cancelled"; detail?:string};
 export type InputFeedbackEvent = InputTranscriptionMessage | InputStatusMessage | {type:"microphone";generation:number} | {type:"assistant";turn_order?:number} | {type:"typed";input_id:string;text:string;transport?:"speech"|"text"};
@@ -52,6 +52,7 @@ export type ResponseChunkMessage = {
   /** Echo of the last consumed `input.append` `t` (Unix ms), when known. */
   t?: number;
   turn_order?: number;
+  caption_unit?: number;
   diagnostic?: RuntimeDiagnostic;
 };
 
@@ -109,6 +110,7 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
         config: value.config,
         ...(isRecord(value.speech) && value.speech.version === 1 && typeof value.speech.transcription === 'boolean' && typeof value.speech.typed_input === 'boolean'
           ? {speech:{version:1,transcription:value.speech.transcription,typed_input:value.speech.typed_input,
+            ...(typeof value.speech.spoken_interruption === 'boolean' ? {spoken_interruption:value.speech.spoken_interruption} : {}),
             ...(typeof value.speech.reason === 'string' ? {reason:value.speech.reason} : {})} as SpeechCapabilities} : {}),
       };
     }
@@ -142,6 +144,7 @@ export function parseServerMessage(value: unknown): ServerMessage | null {
         interrupted,
         t: asUnixMs(value.t),
         ...(isCounter(value.turn_order) ? {turn_order:value.turn_order} : {}),
+        ...(isCounter(value.caption_unit) ? {caption_unit:value.caption_unit} : {}),
         ...(diagnostic ? {diagnostic} : {}),
       };
     }

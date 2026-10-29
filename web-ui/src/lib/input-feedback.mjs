@@ -1,10 +1,10 @@
 /** @typedef {{id:string, role:'user', source:'voice'|'typed', text:string, streaming:boolean, revision:number, turnOrder:number, status:string, statusDetail?:string}} InputEntry */
 /** @typedef {{text:string, label:string, streaming:boolean, turnOrder:number, inputId:string}} InputCaption */
-/** @typedef {{sessionId:string|null, generation:number, latestOrder:number, pendingId:string|null, busy:boolean, caption:InputCaption|null, entries:InputEntry[], status:string, statusSource:'voice'|'typed'|null}} InputFeedback */
+/** @typedef {{sessionId:string|null, generation:number, latestOrder:number, acceptedInputOrder?:number, pendingId:string|null, busy:boolean, caption:InputCaption|null, entries:InputEntry[], status:string, statusSource:'voice'|'typed'|null}} InputFeedback */
 
 /** @param {string|null} sessionId @returns {InputFeedback} */
 export function emptyInputFeedback(sessionId = null) {
-  return {sessionId, generation:0, latestOrder:0, pendingId:null, busy:false, caption:null, entries:[], status:'', statusSource:null};
+  return {sessionId, generation:0, latestOrder:0, acceptedInputOrder:0, pendingId:null, busy:false, caption:null, entries:[], status:'', statusSource:null};
 }
 
 export const inputStatusLabels = {
@@ -49,6 +49,9 @@ export function reduceInputFeedback(state, event) {
     const entries = previous ? state.entries.map(e => e.id === entry.id ? entry : e) : [...state.entries,entry];
     const newest = !state.pendingId && event.turn_order >= state.latestOrder;
     return {...state,entries,latestOrder:Math.max(state.latestOrder,event.turn_order),
+      // ASR progress/no-speech still has an order for display, but only actual
+      // recognized instructions may supersede a response already in flight.
+      acceptedInputOrder:!state.pendingId && event.text.trim() ? Math.max(state.acceptedInputOrder ?? 0,event.turn_order) : state.acceptedInputOrder ?? 0,
       status:newest ? (noSpeech ? 'No speech recognized for caption' : event.final ? 'Transcribed · waiting for a response' : inputStatusLabels.transcribing) : state.status,
       statusSource:newest ? 'voice' : state.statusSource,
       caption:newest && event.text.trim() ? {text:event.text,label:'You · voice',streaming:!event.final,turnOrder:event.turn_order,inputId:entry.id}
@@ -57,7 +60,14 @@ export function reduceInputFeedback(state, event) {
   const terminal = ['waiting','failed','cancelled'].includes(event.state);
   const ownPending = event.input_id === state.pendingId;
   const newest = ownPending || (!state.pendingId && event.turn_order >= state.latestOrder);
+  const typedEntry = state.entries.find(e => e.id === event.input_id && e.source === 'typed');
+  const typedDelivered = event.source === 'typed' && typedEntry && !['failed','cancelled'].includes(typedEntry.status)
+    && ['sent','waiting'].includes(event.state);
   return {...state,latestOrder:Math.max(state.latestOrder,event.turn_order),
+    // The optimistic typed order may be inflated by unrelated ASR progress.
+    // Pending typed input already gates replies; retain only its server-confirmed
+    // delivery order after pending clears, never a failed preparation's guess.
+    acceptedInputOrder:typedDelivered ? Math.max(state.acceptedInputOrder ?? 0,event.turn_order) : state.acceptedInputOrder ?? 0,
     pendingId:ownPending && terminal ? null : state.pendingId,
     busy:ownPending && terminal ? false : state.busy,
     status:newest ? event.detail ?? inputStatusLabels[event.state] : state.status,

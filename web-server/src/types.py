@@ -29,6 +29,7 @@ class Reply:
     t: float | None = None
     turn_order: int | None = None
     diagnostic: dict[str, Any] | None = None
+    caption_unit: int | None = None
 
 
 class SessionError(Exception):

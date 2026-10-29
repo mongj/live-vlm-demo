@@ -24,13 +24,15 @@ import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
 import { emptyInputFeedback, reduceInputFeedback, type InputFeedback, type InputCaption } from "@/lib/input-feedback.mjs";
 import { updateGuidance, type GuidanceState } from "@/lib/assistant-guidance.mjs";
 import { decodePcmBase64, encodePcmBase64, PcmPlayer } from "@/lib/pcm";
+import { CaptionTimeline } from "@/lib/playback-captions";
 import { emptyPlaybackDiagnostics, recordPlaybackEvent, type PlaybackDiagnostics, type StopReason } from "@/lib/playback-diagnostics.mjs";
 import { appendRuntimeDiagnostic, type RuntimeDiagnosticEntry } from "@/lib/runtime-diagnostics.mjs";
 import { FrameRates, type FrameRateSnapshot } from "@/lib/frame-rates";
-import { readPreference, writePreference } from "@/lib/playground-preferences";
-import { SessionEvidence, sessionLogFilename, sanitizeEvidenceSnapshot, safeFailureReason, overloadRecoveryMessage, type EvidenceEvent, type EvidenceReason, type SessionLogSummary } from "@/lib/session-evidence";
+import { readPreference, writePreference, type CaptionSize } from "@/lib/playground-preferences";
+import { SessionEvidence, sessionLogFilename, sanitizeEvidenceSnapshot, safeFailureReason, overloadRecoveryMessage, type EvidenceEvent, type EvidenceReason, type SessionLogSummary, type TranscriptEndReason, type TranscriptInterruptionSource } from "@/lib/session-evidence";
+import { generationConfigErrors, generationEvidence } from "@/lib/generation-config";
 import { SessionLogArchive, type SessionLogArchiveState } from "@/lib/session-log-archive";
-import { canUpdateSessionActivity, describeSessionStatus, type SessionConnection, type SessionActivity } from "@/lib/session-status";
+import { canUpdateSessionActivity, describeSessionStatusView, type SessionConnection, type SessionActivity, type SessionStatusBadge } from "@/lib/session-status";
 import {
   encodeClientMessage,
   inputTranscriptionFromRaw,
@@ -40,7 +42,7 @@ import {
 } from "@/lib/protocol";
 import { getVideoLibrary } from "@/lib/video-library/library";
 import type { VideoPlayback, VideoRecord } from "@/lib/video-library/types";
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 export type CameraViewState = "empty" | "permission" | "connecting" | "live" | "error";
 
@@ -60,6 +62,8 @@ export type TranscriptMessage = {
   status?: string;
   statusDetail?: string;
   turnOrder?: number;
+  endReason?: TranscriptEndReason;
+  interruptionSource?: TranscriptInterruptionSource;
 };
 
 export type DebugRawEntry = {
@@ -85,9 +89,16 @@ export type PlaygroundState = {
   setModelVolume: (volume: number) => void;
   captionsEnabled: boolean;
   toggleCaptions: () => void;
+  captionSize: CaptionSize;
+  setCaptionSize: (size: CaptionSize) => void;
+  captionBackgroundOpacity: number;
+  setCaptionBackgroundOpacity: (opacity: number) => void;
+  resetCaptionAppearance: () => void;
   selectedModel: CatalogModel | undefined;
   phase: SessionPhase;
   sessionId: string | null;
+  /** Monotonic browser time at session acceptance; null before acceptance and after cleanup. */
+  sessionStartedAtMonotonicMs: number | null;
   recoverableError: string | null;
   fatalError: string | null;
   cameraError: string | null;
@@ -109,8 +120,11 @@ export type PlaygroundState = {
   speechCapabilities: SpeechCapabilities | null;
   sessionNotice: string | null;
   sessionStatus: string;
+  sessionStatusBadge: SessionStatusBadge;
   sessionLogSummary: SessionLogSummary | null;
   markSessionIssue: () => void;
+  markSessionStateChange: () => void;
+  stateChangeShortcutHeld: boolean;
   downloadSessionLog: () => void;
   savedSessionLogs: SessionLogArchiveState;
   savedLogDownloadStatus: string;
@@ -168,6 +182,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const videoStreamRef = useRef<MediaStream | null>(null);
   const videoAudioStreamRef = useRef<MediaStream | null>(null);
   const pcmPlayerRef = useRef<PcmPlayer | null>(null);
+  const captionTimelineRef = useRef(new CaptionTimeline());
+  const captionTimerRef = useRef<number | null>(null);
+  const captionObservationKeyRef = useRef<string | null>(null);
+  const lastReplyOrderRef = useRef(-1);
+  const voiceInterruptOrderRef = useRef(-1);
   const frameTimerRef = useRef<number | null>(null);
   const lastSentTRef = useRef<number | null>(null);
   const generationRef = useRef(0);
@@ -184,6 +203,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const streamingDebugIdRef = useRef<string | null>(null);
   const assistantTurnOpenRef = useRef(false);
   const discardReplyAudioRef = useRef(false);
+  const microphoneSpeechActiveRef = useRef(false);
   const suppressInputBargeInRef = useRef(false);
   const stoppingRef = useRef(false);
   const endingRef = useRef<SessionEndWaiter | null>(null);
@@ -211,13 +231,42 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [sessionLogSummary, setSessionLogSummary] = useState<SessionLogSummary | null>(null);
   const [sessionConnection, setSessionConnection] = useState<SessionConnection>("none");
   const [sessionActivity, setSessionActivity] = useState<SessionActivity>("idle");
+  const [stateChangeShortcutHeld, setStateChangeShortcutHeld] = useState(false);
+  const markStateChangeRef = useRef<(source:"button"|"keyboard")=>void>(()=>{});
+  markStateChangeRef.current = (source) => {
+    if (liveRef.current && !stoppingRef.current) recordEvidence("state_change",{markerSource:source});
+  };
+
+  useEffect(() => {
+    const release = () => setStateChangeShortcutHeld(false);
+    const down = (event:KeyboardEvent) => {
+      if (!liveRef.current || stoppingRef.current || event.defaultPrevented || event.repeat || event.isComposing
+        || !event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.key.toLowerCase() !== "m") return;
+      const target=event.target;
+      if (target instanceof Element && target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="combobox"]')) return;
+      event.preventDefault();
+      setStateChangeShortcutHeld(true);
+      markStateChangeRef.current("keyboard");
+    };
+    const up = (event:KeyboardEvent) => {
+      if (event.key.toLowerCase() === "m" || event.key === "Shift") release();
+    };
+    window.addEventListener("keydown",down);
+    window.addEventListener("keyup",up);
+    window.addEventListener("blur",release);
+    return () => {
+      window.removeEventListener("keydown",down);
+      window.removeEventListener("keyup",up);
+      window.removeEventListener("blur",release);
+    };
+  }, []);
 
   function recordEvidence(event:EvidenceEvent, data:Record<string,unknown>={}) {
     const log=evidenceRef.current;
     if (!log) return;
     log.add(event,data);
     const now=performance.now();
-    if (!["input","output","diagnostic","playback"].includes(event) || now-evidencePublishedAtRef.current >= 1000) {
+    if (!["input","output","diagnostic","playback","caption_timeline"].includes(event) || now-evidencePublishedAtRef.current >= 1000) {
       evidencePublishedAtRef.current=now;
       setSessionLogSummary(log.summary());
     }
@@ -273,6 +322,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     const log=evidenceRef.current;
     if (!log) return;
     if (terminal) {
+      recordCaptionClear("failure");
+      pcmPlayerRef.current?.stop("closed");
       log.finish(reason);
       archiveCompletedEvidence(log);
       setSessionConnection("failed");
@@ -284,6 +335,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   function finishEvidence(reason:EvidenceReason) {
     const log=evidenceRef.current;
     if (!log) return;
+    recordCaptionClear("session_ended");
+    pcmPlayerRef.current?.stop("closed");
     log.finish(reason);
     archiveCompletedEvidence(log);
     setSessionLogSummary(log.summary());
@@ -298,9 +351,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     initialCatalogError ?? (initialModels.length > 0 ? null : "Catalog did not return any models")
   );
   const [models, setModels] = useState<CatalogModel[]>(initialModels);
-  const [selectedModelId, setSelectedModelIdState] = useState(initialModels[0]?.id ?? "");
+  const initialModel = initialModels.find(model => model.id === "minicpm-o-4-5") ?? initialModels[0];
+  const [selectedModelId, setSelectedModelIdState] = useState(initialModel?.id ?? "");
   const [config, setConfig] = useState<Record<string, unknown>>(() =>
-    initialModels[0] ? defaultsFromSchema(initialModels[0].config_schema) : {}
+    initialModel ? defaultsFromSchema(initialModel.config_schema) : {}
   );
   const [serverAddress, setServerAddressState] = useState(DEFAULT_GATEWAY_ADDRESS);
   const [framesPerSecond, setFramesPerSecondState] = useState(DEFAULT_FRAMES_PER_SECOND);
@@ -308,8 +362,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [modelMuted, setModelMuted] = useState(false);
   const [modelVolume, setModelVolumeState] = useState(1);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [captionSize, setCaptionSizeState] = useState<CaptionSize>("compact");
+  const [captionBackgroundOpacity, setCaptionBackgroundOpacityState] = useState(0.5);
   const [phase, setPhase] = useState<SessionPhase>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionStartedAtMonotonicMs, setSessionStartedAtMonotonicMs] = useState<number | null>(null);
   const [recoverableError, setRecoverableError] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -324,7 +381,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [cameraOn, setCameraOn] = useState(false);
   const [messages, setMessagesState] = useState<TranscriptMessage[]>([]);
   const messagesRef = useRef<TranscriptMessage[]>([]);
-  const [includeTranscript,setIncludeTranscript] = useState(false);
+  const [includeTranscript,setIncludeTranscript] = useState(true);
   function setMessages(update:TranscriptMessage[]|((current:TranscriptMessage[])=>TranscriptMessage[])) {
     const next=typeof update === "function" ? update(messagesRef.current) : update;
     messagesRef.current=next;
@@ -340,6 +397,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnosticEntry[]>([]);
   const runtimeDiagnosticsRef = useRef<RuntimeDiagnosticEntry[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [microphoneSpeechActive, setMicrophoneSpeechActive] = useState(false);
 
   useEffect(() => {
     const volume = readPreference("modelVolume");
@@ -353,9 +411,28 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setModelVolumeState(volume);
     setModelMuted(volume === 0);
     setCaptionsEnabled(captions);
+    setCaptionSizeState(readPreference("captionSize"));
+    setCaptionBackgroundOpacityState(readPreference("captionBackgroundOpacity"));
     pcmPlayerRef.current?.setVolume(volume);
     pcmPlayerRef.current?.setMuted(volume === 0);
   }, []);
+
+  function setCaptionSize(size: CaptionSize) {
+    if (size !== "compact" && size !== "normal" && size !== "large") return;
+    setCaptionSizeState(size);
+    writePreference("captionSize", size);
+  }
+
+  function setCaptionBackgroundOpacity(opacity: number) {
+    if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) return;
+    setCaptionBackgroundOpacityState(opacity);
+    writePreference("captionBackgroundOpacity", opacity);
+  }
+
+  function resetCaptionAppearance() {
+    setCaptionSize("compact");
+    setCaptionBackgroundOpacity(0.5);
+  }
 
   function setModelVolume(value: number) {
     if (!Number.isFinite(value)) return;
@@ -365,6 +442,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     modelMutedRef.current = volume === 0;
     setModelVolumeState(volume);
     setModelMuted(volume === 0);
+    if (volume === 0) captionTimelineRef.current.mute(pcmPlayerRef.current?.clockTime() ?? 0, performance.now());
     pcmPlayerRef.current?.setVolume(volume);
     pcmPlayerRef.current?.setMuted(volume === 0);
     writePreference("modelVolume", volume);
@@ -376,6 +454,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     videoAudioStream,
     onChunk: sendAudio,
     onSpeechStart: maybeBargeInFromMic,
+    onSpeechEnd: () => {
+      microphoneSpeechActiveRef.current = false;
+      setMicrophoneSpeechActive(false);
+      recordEvidence("input_status", {source:"microphone",state:"speech_end"});
+    },
     onPermissionGranted: devices.refresh,
     onMicrophoneChunk: sendMicrophone,
     onMicrophoneReset: resetMicrophone,
@@ -397,6 +480,15 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   configRef.current = config;
   framesPerSecondRef.current = framesPerSecond;
 
+  function recordClientConfiguration() {
+    recordEvidence("client_config", {
+      configurationSource:"browser_observed", telemetryRevision:2,
+      requestedFps:framesPerSecondRef.current, microphoneMode:audio.mode,
+      microphoneEnabled:audio.enabled, videoSource:videoSourceRef.current,
+      videoAudioSelected:audio.videoAudioSelected, captionsEnabled:captionsEnabledRef.current,
+    });
+  }
+
   function applyModel(model: CatalogModel) {
     const nextConfig = defaultsFromSchema(model.config_schema);
     setSelectedModelIdState(model.id);
@@ -415,7 +507,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       setModels(nextModels);
       setCatalogStatus("ready");
       const current = nextModels.find((model) => model.id === selectedModelIdRef.current);
-      applyModel(current ?? nextModels[0]);
+      const next = current ?? nextModels.find(model => model.id === "minicpm-o-4-5") ?? nextModels[0];
+      if (next) applyModel(next);
       fetchedOriginRef.current = parseGatewayAddress(address);
     } catch (error) {
       setCatalogStatus("error");
@@ -507,13 +600,21 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setActiveVideo(null);
   }
 
-  function stopPcmPlayer() {
+  function stopPcmPlayer(clearReason:"reset"|"session_ended" = "reset") {
+    cancelCaptions(clearReason);
+    if (captionTimerRef.current !== null) window.clearInterval(captionTimerRef.current);
+    captionTimerRef.current = null;
     pcmPlayerRef.current?.close();
     pcmPlayerRef.current = null;
   }
 
   function createPcmPlayer(): PcmPlayer {
-    const player = new PcmPlayer();
+    const sessionLog = evidenceRef.current;
+    const player = new PcmPlayer((event) => {
+      // AudioContext promises/callbacks may outlive a session. Never attach
+      // an old player's completion to a newly created diagnostic log.
+      if (evidenceRef.current === sessionLog) recordEvidence("playback", { ...event });
+    });
     player.setVolume(modelVolumeRef.current);
     player.setMuted(modelMutedRef.current);
     void player.setOutputDevice(outputDeviceIdRef.current).catch(() => undefined);
@@ -525,6 +626,32 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       pcmPlayerRef.current = createPcmPlayer();
     }
     return pcmPlayerRef.current;
+  }
+
+  function recordCaptionClear(captionClearReason:"reset"|"interrupted"|"session_ended"|"failure", source?:StopReason) {
+    if (captionObservationKeyRef.current !== null || captionTimelineRef.current.isActive()) {
+      recordEvidence("caption_timeline",{captionState:"cleared",captionClearReason,source,textChars:0});
+    }
+    captionObservationKeyRef.current=null;
+  }
+
+  function cancelCaptions(reason:"reset"|"interrupted"|"session_ended"|"failure" = "reset", source?:StopReason) {
+    recordCaptionClear(reason,source);
+    captionTimelineRef.current.cancel();
+    setGuidance(null);
+  }
+
+  function refreshCaptions() {
+    const text=captionTimelineRef.current.read(pcmPlayerRef.current?.clockTime() ?? 0,performance.now());
+    const observation=captionTimelineRef.current.observation();
+    const key=observation ? JSON.stringify(observation) : null;
+    if (key !== captionObservationKeyRef.current) {
+      captionObservationKeyRef.current=key;
+      if (observation) recordEvidence("caption_timeline",{captionState:"observed",...observation});
+    }
+    const streaming=assistantTurnOpenRef.current;
+    setGuidance(current=> current?.text === text && current.streaming === streaming ? current
+      : text ? {text,streaming,modelId:selectedModelIdRef.current} : null);
   }
 
   function sendAudio(pcm: Uint8Array) {
@@ -548,7 +675,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
   function applyInputFeedback(event: InputFeedbackEvent) {
     const next = reduceInputFeedback(feedbackRef.current, event);
-    if (next === feedbackRef.current) return;
+    if (next === feedbackRef.current) return next;
     feedbackRef.current = next;
     setInputFeedback(next);
     setMessages(current => {
@@ -558,12 +685,13 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       result.push(...next.entries.filter(entry => !existing.has(entry.id)));
       return result.filter(entry=>entry.status !== 'no_speech').sort((a,b) => (a.turnOrder ?? 0) - (b.turnOrder ?? 0));
     });
+    return next;
   }
 
   function resetMicrophone() {
     micGenerationRef.current += 1;
     micSequenceRef.current = 0;
-    if (!liveRef.current || !speechRef.current?.transcription) return;
+    if (!liveRef.current || !(speechRef.current?.transcription || speechRef.current?.spoken_interruption)) return;
     applyInputFeedback({type:'microphone',generation:micGenerationRef.current});
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(encodeClientMessage({type:'input.microphone',generation:micGenerationRef.current,sequence:0,enabled:false}));
@@ -571,7 +699,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
   function sendMicrophone(pcm: Uint8Array) {
     const socket = socketRef.current;
-    if (!liveRef.current || !speechRef.current?.transcription || feedbackRef.current.busy || socket?.readyState !== WebSocket.OPEN) return;
+    if (!liveRef.current || !(speechRef.current?.transcription || speechRef.current?.spoken_interruption) || feedbackRef.current.busy || socket?.readyState !== WebSocket.OPEN) return;
     // A separate channel contains only already-enabled microphones, never video audio.
     if (socket.bufferedAmount > 256_000) { resetMicrophone(); return; }
     socket.send(encodeClientMessage({type:'input.microphone',generation:micGenerationRef.current,
@@ -587,18 +715,26 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function replyPlaybackActive(): boolean {
-    return assistantTurnOpenRef.current || Boolean(pcmPlayerRef.current?.isActive());
+    return assistantTurnOpenRef.current || Boolean(pcmPlayerRef.current?.isActive()) || captionTimelineRef.current.isActive();
   }
 
   function interruptPlayback(reason: StopReason = 'typed', clearActivity=true) {
-    recordEvidence("interrupt",{source:reason});
+    const queuedAudioMs=pcmPlayerRef.current?.queuedMs() ?? 0;
+    recordEvidence("interrupt",{source:reason,queuedAudioMs});
     if (clearActivity) setSessionActivity(current=>reason === "server" && current !== "responding" ? current : "idle");
     if (replyPlaybackActive()) {
       setPlaybackDiagnostics((current) => recordPlaybackEvent(current, {type:'interrupt',reason}));
     }
     const hadOpenTurn = assistantTurnOpenRef.current;
-    setGuidance((current) => updateGuidance(current, { interrupted: true, final: !hadOpenTurn }));
-    pcmPlayerRef.current?.stop();
+    cancelCaptions("interrupted",reason);
+    const cancelledAudioMs=pcmPlayerRef.current?.stop("interrupted") ?? 0;
+    recordEvidence("playback",{source:reason,state:"stopped",cancelledAudioMs});
+    const interruptedId = streamingAssistantIdRef.current;
+    if (interruptedId) {
+      setMessages(current => current.map(entry => entry.id === interruptedId ? { ...entry, streaming: false, endReason:"interrupted", interruptionSource:reason } : entry));
+      streamingAssistantIdRef.current = null;
+    }
+    setIsStreaming(false);
     if (hadOpenTurn) {
       discardReplyAudioRef.current = true;
     }
@@ -606,26 +742,30 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function maybeBargeInFromMic() {
+    microphoneSpeechActiveRef.current = true;
+    setMicrophoneSpeechActive(true);
+    recordEvidence("input_status",{source:"microphone",state:"speech_onset"});
     if (replyPlaybackActive()) {
       interruptPlayback('microphone');
     }
   }
 
-  function playReplyAudio(pcmBase64: string) {
+  function playReplyAudio(pcmBase64: string, accepted = true, caption_unit?:number) {
     try {
       const bytes = decodePcmBase64(pcmBase64).byteLength;
-      const discarded = discardReplyAudioRef.current || modelMutedRef.current;
-      recordEvidence("playback",{bytes,discarded});
+      const discarded = !accepted || discardReplyAudioRef.current || modelMutedRef.current;
+      recordEvidence("playback",{bytes,discarded,caption_unit});
       setPlaybackDiagnostics((current) => recordPlaybackEvent(current, {type:'audio',bytes,discarded}));
     } catch {
       // The player already ignores malformed PCM; do not count it as valid audio.
     }
-    if (discardReplyAudioRef.current || modelMutedRef.current) {
-      return;
+    if (!accepted || discardReplyAudioRef.current || modelMutedRef.current) {
+      return null;
     }
     const player = ensurePcmPlayer();
-    player.enqueue(pcmBase64);
+    const interval=player.enqueue(pcmBase64, caption_unit);
     void player.resume();
+    return interval;
   }
 
   function stopFrameTimer() {
@@ -666,9 +806,15 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     streamingDebugIdRef.current = null;
     assistantTurnOpenRef.current = false;
     discardReplyAudioRef.current = false;
+    microphoneSpeechActiveRef.current = false;
+    setMicrophoneSpeechActive(false);
     suppressInputBargeInRef.current = false;
+    setStateChangeShortcutHeld(false);
+    lastReplyOrderRef.current = -1;
+    voiceInterruptOrderRef.current = -1;
     setIsStreaming(false);
     setSessionId(null);
+    setSessionStartedAtMonotonicMs(null);
     setPhase("idle");
     setMessages([]);
     setGuidance(null);
@@ -772,6 +918,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     } catch {
       recordSessionFailure("malformed_message",false);
       setRecoverableError("Received malformed JSON from the gateway");
+      cancelCaptions();
       setGuidance((current) => updateGuidance(current, { failed: true, turnOpen: turnOpenOnReceipt }));
       return;
     }
@@ -800,6 +947,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
     switch (message.type) {
       case "session.started":
+        if (!liveRef.current) setSessionStartedAtMonotonicMs(performance.now());
         recordEvidence("session_accepted");
         setSessionConnection("accepted");
         setSessionActivity("idle");
@@ -815,13 +963,23 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         setRecoverableError(null);
         startFrameLoop();
         void ensurePcmPlayer().resume();
+        captionTimelineRef.current.cancel();
+        if (captionTimerRef.current !== null) window.clearInterval(captionTimerRef.current);
+        captionTimerRef.current = window.setInterval(refreshCaptions,50);
         break;
       case "input.transcription":
       case "input.status": {
         if (message.session_id !== feedbackRef.current.sessionId) break;
-        const eligible=canUpdateSessionActivity(feedbackRef.current,message);
+        const previousFeedback=feedbackRef.current;
+        const eligible=canUpdateSessionActivity(previousFeedback,message);
+        const nextFeedback=applyInputFeedback(message);
+        const instructionAccepted=message.type === "input.transcription"
+          ? nextFeedback !== previousFeedback && !!message.text.trim() && !previousFeedback.pendingId
+            && message.turn_order >= (previousFeedback.acceptedInputOrder ?? 0)
+          : (nextFeedback.acceptedInputOrder ?? 0) > (previousFeedback.acceptedInputOrder ?? 0);
+        const inputOrdering={latestObservedOrder:nextFeedback.latestOrder,acceptedInputOrder:nextFeedback.acceptedInputOrder ?? 0,instructionAccepted};
         if (message.type === "input.status") {
-          recordEvidence("input_status",{source:message.source,inputId:message.input_id,state:message.state,turnOrder:message.turn_order,generation:message.generation,accepted:eligible});
+          recordEvidence("input_status",{source:message.source,inputId:message.input_id,state:message.state,turnOrder:message.turn_order,generation:message.generation,accepted:eligible,...inputOrdering});
           if (eligible) {
             if (message.state === "preparing" || message.state === "sending") {
               const activity=message.state;
@@ -832,10 +990,16 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
             if (message.state === "cancelled") setSessionActivity(current=>current === "responding" ? current : "idle");
           }
         } else {
-          recordEvidence("input_status",{source:"voice",inputId:message.utterance_id,state:"transcribing",final:message.final,revision:message.revision,turnOrder:message.turn_order,generation:message.generation,accepted:eligible,hasText:!!message.text.trim(),textChars:message.text.length});
-          if (eligible && message.final && message.text.trim()) setSessionActivity(current=>current === "responding" ? current : "waiting");
+          recordEvidence("input_status",{source:"voice",inputId:message.utterance_id,state:"transcribing",final:message.final,revision:message.revision,turnOrder:message.turn_order,generation:message.generation,accepted:eligible,...inputOrdering,hasText:!!message.text.trim(),textChars:message.text.length});
+          if ((eligible || (instructionAccepted && message.turn_order > lastReplyOrderRef.current)) && message.final && message.text.trim()) setSessionActivity(current=>current === "responding" ? current : "waiting");
+          // ASR is a fallback, not a second interruption for the same question.
+          // MiniCPM/JoyAI turn orders distinguish a new instruction from a late
+          // transcription revision belonging to the answer already playing.
+          if (instructionAccepted && message.turn_order > voiceInterruptOrderRef.current) {
+            voiceInterruptOrderRef.current=message.turn_order;
+            if (message.turn_order > lastReplyOrderRef.current && replyPlaybackActive()) interruptPlayback('input-transcription');
+          }
         }
-        applyInputFeedback(message);
         if (eligible && message.type === 'input.status' && message.input_id === typedWaiterRef.current?.id) {
           if (message.state === 'waiting') { finishTyped(true); resetMicrophone(); }
           if (message.state === 'failed' || message.state === 'cancelled') {
@@ -850,7 +1014,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         if (message.session_id !== feedbackRef.current.sessionId) break;
         if (message.diagnostic) {
           const diagnostic=message.diagnostic;
-          recordEvidence("diagnostic",{state:diagnostic.event,stage:diagnostic.stage,elapsed_ms:diagnostic.elapsed_ms,chunk_index:diagnostic.chunk_index,...diagnostic.input,...diagnostic.output,inputAudioMs:diagnostic.input.audio_ms,outputAudioMs:diagnostic.output.audio_ms,...diagnostic.speech,...diagnostic.metrics});
+          const native=diagnostic.native;
+          recordEvidence("diagnostic",{state:diagnostic.event,stage:diagnostic.stage,elapsed_ms:diagnostic.elapsed_ms,chunk_index:diagnostic.chunk_index,...diagnostic.input,...diagnostic.output,inputAudioMs:diagnostic.input.audio_ms,outputAudioMs:diagnostic.output.audio_ms,...diagnostic.speech,...diagnostic.metrics,
+            ...(native ? {native_kind:native.kind,native_matched:native.matched,native_input_sequence:native.input_sequence,
+              native_input_age_ms:native.input_age_ms,native_input_frames:native.input_frames,native_input_audio_ms:native.input_audio_ms,
+              native_force_listen:native.force_listen,native_force_source:native.force_source,native_listen_events:native.listen_events,
+              native_listen_streak:native.listen_streak,native_since_content_ms:native.since_content_ms} : {})});
           frameRatesRef.current.upstream(message.diagnostic.input.frames, performance.now());
           const entries = appendRuntimeDiagnostic(runtimeDiagnosticsRef.current, message.diagnostic, Date.now());
           if (entries !== runtimeDiagnosticsRef.current) {
@@ -869,45 +1038,56 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         const presentableInput = hasPresentableText(inputChunk);
         const feedback=feedbackRef.current;
         const pendingOrder=feedback.entries.find(entry=>entry.id === feedback.pendingId)?.turnOrder ?? 0;
-        const replyIsCurrent=!discardReplyAudioRef.current && (message.turn_order === undefined || message.turn_order >= Math.max(feedback.latestOrder,pendingOrder));
+        const acceptedInputOrder=feedback.acceptedInputOrder ?? 0;
+        const orderIsCurrent=message.turn_order === undefined || message.turn_order >= Math.max(acceptedInputOrder,lastReplyOrderRef.current,pendingOrder);
+        if (message.interrupted) {
+          interruptPlayback('server',orderIsCurrent && turnOpenOnReceipt && !feedback.pendingId);
+        } else if (presentableInput && replyPlaybackActive() && !suppressInputBargeInRef.current) {
+          interruptPlayback('input-transcription');
+        }
+        // An onset can precede the first model chunk. Retain the speech level
+        // so that output cannot slip through while the user is still talking.
+        if ((presentable || message.audio) && microphoneSpeechActiveRef.current && !discardReplyAudioRef.current) {
+          if (!message.final) assistantTurnOpenRef.current = true;
+          interruptPlayback('microphone');
+        }
+        const replyIsCurrent=orderIsCurrent && !discardReplyAudioRef.current && !microphoneSpeechActiveRef.current && !message.interrupted;
+        const dropReason=message.interrupted ? "server_interrupted" : !orderIsCurrent ? "stale_order"
+          : microphoneSpeechActiveRef.current ? "microphone_active" : discardReplyAudioRef.current ? "interrupted_turn" : undefined;
+        const replyDecision={accepted:replyIsCurrent,discarded:!replyIsCurrent,dropReason,latestObservedOrder:feedback.latestOrder,
+          acceptedInputOrder,pendingInputOrder:pendingOrder,lastReplyOrder:lastReplyOrderRef.current};
         if (message.final || message.interrupted) {
-          recordEvidence("response_boundary",{final:message.final,interrupted:message.interrupted,turnOrder:message.turn_order,accepted:replyIsCurrent,discarded:discardReplyAudioRef.current});
+          recordEvidence("response_boundary",{final:message.final,interrupted:message.interrupted,turnOrder:message.turn_order,...replyDecision});
+        }
+        if (chunk.length || message.audio) {
+          // Counts only: preserve whitespace-only arrivals for boundary tracing
+          // without retaining additional text or changing reply acceptance.
+          recordEvidence("output",{textChars:chunk.length,leadingWhitespace:chunk.match(/^\s*/u)?.[0].length ?? 0,
+            trailingWhitespace:chunk.match(/\s*$/u)?.[0].length ?? 0,whitespaceOnly:chunk.length > 0 && !presentable,
+            caption_unit:message.caption_unit,final:message.final,interrupted:message.interrupted,turnOrder:message.turn_order,...replyDecision});
         }
         if (presentable || message.audio) {
-          recordEvidence("output",{textChars:chunk.length,final:message.final,interrupted:message.interrupted,turnOrder:message.turn_order});
           if (replyIsCurrent && !message.interrupted) setSessionActivity(message.final ? "idle" : "responding");
         } else if (message.final && !presentableInput && !message.diagnostic && replyIsCurrent && turnOpenOnReceipt && !feedback.pendingId) {
           setSessionActivity(current=>current === "responding" ? "idle" : current);
         }
         if ((presentable || message.audio) && replyIsCurrent && !message.interrupted) {
+          if (message.turn_order !== undefined) lastReplyOrderRef.current=message.turn_order;
           applyInputFeedback({type:'assistant',turn_order:message.turn_order ?? (turnOpenOnReceipt ? feedback.latestOrder : undefined)});
         }
 
-        if (message.interrupted) {
-          interruptPlayback('server',replyIsCurrent && turnOpenOnReceipt && !feedback.pendingId);
-        } else if (
-          presentableInput &&
-          replyPlaybackActive() &&
-          !suppressInputBargeInRef.current
-        ) {
-          interruptPlayback('input-transcription');
-        }
         if (presentableInput) {
           suppressInputBargeInRef.current = true;
         }
-        setGuidance((current) => updateGuidance(current, {
-          text: chunk,
-          final: message.final,
-          modelId: selectedModelIdRef.current,
-          interrupted: message.interrupted,
-        }));
+        if (replyIsCurrent && chunk.length) captionTimelineRef.current.addText(chunk,message.caption_unit,performance.now());
         if (message.audio) {
-          playReplyAudio(message.audio);
+          const interval=playReplyAudio(message.audio, replyIsCurrent, message.caption_unit);
+          if (replyIsCurrent) captionTimelineRef.current.schedule(message.caption_unit,interval,performance.now());
         }
         if ((message.audio || presentable) && !message.final) {
           assistantTurnOpenRef.current = true;
         }
-        if (presentable && !discardReplyAudioRef.current) {
+        if (presentable && replyIsCurrent) {
           suppressInputBargeInRef.current = false;
         }
 
@@ -953,7 +1133,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         }
 
         // A streamed word boundary can arrive as its own whitespace-only chunk.
-        if (presentable || (chunk.length > 0 && streamingAssistantIdRef.current)) {
+        if (replyIsCurrent && (presentable || (chunk.length > 0 && streamingAssistantIdRef.current))) {
           const streamingId = streamingAssistantIdRef.current;
           if (streamingId) {
             setMessages((current) =>
@@ -963,6 +1143,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
                       ...entry,
                       text: `${entry.text}${chunk}`,
                       streaming: !message.final,
+                      ...(message.final ? {endReason:"model_final" as const} : {}),
                     }
                   : entry
               )
@@ -980,13 +1161,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
                 turnOrder: message.turn_order,
                 text: chunk,
                 streaming: !message.final,
+                ...(message.final ? {endReason:"model_final" as const} : {}),
               },
             ]);
           }
         } else if (streamingAssistantIdRef.current && message.final) {
           const streamingId = streamingAssistantIdRef.current;
           setMessages((current) =>
-            current.map((entry) => (entry.id === streamingId ? { ...entry, streaming: false } : entry))
+            current.map((entry) => (entry.id === streamingId ? { ...entry, streaming: false, ...(replyIsCurrent ? {endReason:"model_final" as const} : {}) } : entry))
           );
         }
 
@@ -1034,12 +1216,16 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
           streamingDebugIdRef.current = null;
           assistantTurnOpenRef.current = false;
           discardReplyAudioRef.current = false;
+          if (replyIsCurrent) captionTimelineRef.current.finish(performance.now());
         }
 
-        setIsStreaming(!message.final);
+        refreshCaptions();
+
+        setIsStreaming(replyIsCurrent && !message.final);
         break;
       }
       case "error":
+        cancelCaptions("failure");
         recordSessionFailure(safeFailureReason(message.message),message.fatal);
         if (typedWaiterRef.current) {
           applyInputFeedback({type:'input.status',session_id:feedbackRef.current.sessionId ?? '',input_id:typedWaiterRef.current.id,
@@ -1067,7 +1253,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   // A session has no source identity in the protocol. Stop it on replacement so
   // replies already in flight cannot be presented over a different video.
   function invalidateSourceSession() {
-    setGuidance(null);
+    cancelCaptions();
     if (phase !== "idle") {
       void endSession();
       setSessionNotice("Video source changed. Start a new session to receive assistance for this source.");
@@ -1315,6 +1501,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     const generation = generationRef.current + 1;
     generationRef.current = generation;
     if (evidenceRef.current) {
+      recordCaptionClear("session_ended");
       evidenceRef.current.finish("replaced");
       archiveCompletedEvidence(evidenceRef.current);
     }
@@ -1322,6 +1509,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     evidencePublishedAtRef.current=-Infinity;
     microphoneSentRef.current=false;
     recordEvidence("start");
+    recordClientConfiguration();
     setSessionConnection("connecting");
     setSessionActivity("idle");
     setFatalError(null);
@@ -1334,6 +1522,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setRuntimeDiagnostics([]);
     setIsStreaming(false);
     setPhase("connecting");
+    setSessionStartedAtMonotonicMs(null);
     frameRatesRef.current.reset();
     setFrameRates(frameRatesRef.current.read(performance.now()));
 
@@ -1350,12 +1539,22 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
 
     const model = selectedModelRef.current;
-    const sessionConfig = configRef.current;
+    const sessionConfig = { ...configRef.current };
     if (!model) {
       recordSessionFailure("startup_failed");
       setPhase("idle");
       return;
     }
+
+    if (Object.keys(generationConfigErrors(model.id, model.config_schema, sessionConfig)).length) {
+      recordSessionFailure("startup_failed");
+      setFatalError("Check the values in Advanced generation before starting.");
+      cleanupSession();
+      return;
+    }
+    const requestedGeneration = generationEvidence(model.id, model.config_schema, sessionConfig);
+    if (requestedGeneration) recordEvidence("generation_config", requestedGeneration);
+    recordEvidence("client_config", {customPromptPresent:typeof sessionConfig.system_prompt === "string" && sessionConfig.system_prompt.trim().length > 0});
 
     let socket:WebSocket;
     try {
@@ -1444,7 +1643,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     stopFrameTimer();
     liveRef.current = false;
     audio.cancelCapture();
-    stopPcmPlayer();
+    stopPcmPlayer("session_ended");
 
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -1619,6 +1818,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       cameraRequestIdRef.current += 1;
       fileRequestIdRef.current += 1;
       endingRef.current?.reject(new Error("unmounted"));
+      recordCaptionClear("session_ended");
+      pcmPlayerRef.current?.stop("closed");
       evidenceRef.current?.finish("unmounted");
       if (evidenceRef.current) archiveCompletedEvidence(evidenceRef.current);
       cleanupSession();
@@ -1634,12 +1835,22 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }, [outputDeviceId]);
 
   useEffect(() => {
+    if (phase === "live") recordClientConfiguration();
+    // Record only changes to these browser settings, not every diagnostic render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, framesPerSecond, audio.mode, audio.enabled, audio.videoAudioSelected, videoSource, captionsEnabled]);
+
+  useEffect(() => {
     if (phase !== "live") return;
     const timer = window.setInterval(() => setFrameRates(frameRatesRef.current.read(performance.now())), 1000);
     return () => window.clearInterval(timer);
   }, [phase]);
 
+  const generationValid = useMemo(() => !selectedModel ||
+    Object.keys(generationConfigErrors(selectedModel.id, selectedModel.config_schema, config)).length === 0,
+  [selectedModel, config]);
   const sessionActive = phase !== "idle";
+  const sessionStatusView = describeSessionStatusView({phase,connection:sessionConnection,activity:sessionActivity,mode:audio.mode,holding:audio.holding,listening:audio.listening,pending:audio.pending,micError:Boolean(audio.error),speaking:microphoneSpeechActive,watching:(frameRates.submitted ?? 0) > 0});
 
   return {
     catalogStatus,
@@ -1654,6 +1865,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     modelVolume,
     setModelVolume,
     captionsEnabled,
+    captionSize,
+    setCaptionSize,
+    captionBackgroundOpacity,
+    setCaptionBackgroundOpacity,
+    resetCaptionAppearance,
     toggleCaptions: () => {
       captionsEnabledRef.current = !captionsEnabledRef.current;
       setCaptionsEnabled(captionsEnabledRef.current);
@@ -1666,11 +1882,13 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       }
       modelMutedRef.current = !modelMutedRef.current;
       setModelMuted(modelMutedRef.current);
+      if (modelMutedRef.current) captionTimelineRef.current.mute(pcmPlayerRef.current?.clockTime() ?? 0,performance.now());
       pcmPlayerRef.current?.setMuted(modelMutedRef.current);
     },
     selectedModel,
     phase,
     sessionId,
+    sessionStartedAtMonotonicMs,
     recoverableError,
     fatalError,
     cameraError,
@@ -1709,9 +1927,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     typedBusy: inputFeedback.busy,
     speechCapabilities,
     sessionNotice,
-    sessionStatus:describeSessionStatus({phase,connection:sessionConnection,activity:sessionActivity,mode:audio.mode,holding:audio.holding,listening:audio.listening,pending:audio.pending,micError:Boolean(audio.error)}),
+    sessionStatus:sessionStatusView.detail,
+    sessionStatusBadge:sessionStatusView,
     sessionLogSummary,
     markSessionIssue:()=>{ if (liveRef.current && !stoppingRef.current) recordEvidence("issue"); },
+    markSessionStateChange:()=>markStateChangeRef.current("button"),
+    stateChangeShortcutHeld,
     downloadSessionLog,
     savedSessionLogs,
     includeTranscript,
@@ -1724,7 +1945,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     runtimeDiagnostics,
     isStreaming,
     sessionActive,
-    canStart: catalogStatus === "ready" && Boolean(selectedModel) && phase === "idle",
+    canStart: catalogStatus === "ready" && Boolean(selectedModel) && phase === "idle" && generationValid,
     videoRef,
     setSelectedModelId: (id: string) => {
       if (sessionActive) {

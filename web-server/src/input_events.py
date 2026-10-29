@@ -9,6 +9,7 @@ class SpeechCapabilities(TypedDict):
     version: Literal[1]
     transcription: bool
     typed_input: bool
+    spoken_interruption: NotRequired[bool]
     reason: NotRequired[str]
 
 

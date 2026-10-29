@@ -17,6 +17,7 @@ import { Separator } from "@/components/ui/separator";
 import type { PlaygroundState } from "@/hooks/use-playground";
 import { MAX_FRAMES_PER_SECOND, MIN_FRAMES_PER_SECOND } from "@/lib/capture";
 import { GATEWAY_ADDRESS_PLACEHOLDER } from "@/lib/gateway";
+import { generationConfigErrors, generationDefaults, SAMPLING_KEYS, splitGenerationSchema } from "@/lib/generation-config";
 import { ChevronDownIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -115,17 +116,40 @@ export function CatalogRetryButton({ playground }: PlaygroundConfigProps) {
 
 export function ModelConfigSection({ playground }: PlaygroundConfigProps) {
   const { selectedModel, catalogError, sessionActive, config, setConfigValue } = playground;
+  const split = selectedModel ? splitGenerationSchema(selectedModel.id, selectedModel.config_schema) : null;
+  const errors = selectedModel ? generationConfigErrors(selectedModel.id, selectedModel.config_schema, config) : {};
 
   return (
     <ConfigSection subtitle="Applied when the Session starts" title="Model Configuration">
       <div className="min-w-0 overflow-x-hidden px-4.5 pt-3.5 pb-4.5">
         {selectedModel ? (
+          <div className="flex flex-col gap-4">
           <SchemaForm
             disabled={sessionActive}
             onChange={setConfigValue}
-            schema={selectedModel.config_schema}
+            schema={split?.basic ?? selectedModel.config_schema}
             values={config}
           />
+          {split?.advanced ? (
+            <Collapsible className="group/advanced flex flex-col gap-3" defaultOpen={false}>
+              <CollapsibleTrigger asChild>
+                <Button className="w-full justify-between" type="button" variant="outline" size="sm">
+                  Advanced generation
+                  <ChevronDownIcon data-icon="inline-end" className="transition-transform group-data-[state=open]/advanced:rotate-180" />
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="flex flex-col gap-3">
+                <p className="text-xs text-muted-foreground">Applied to the next session. Greedy changes text selection; speech can still vary.</p>
+                <SchemaForm schema={split.advanced} values={config} onChange={setConfigValue}
+                  strictNumbers disabled={sessionActive} disabledFields={config.decode_mode === "greedy" ? SAMPLING_KEYS : undefined} errors={errors} />
+                <Button type="button" size="sm" variant="ghost" disabled={sessionActive} onClick={() => {
+                  for (const [key, value] of Object.entries(generationDefaults(selectedModel.config_schema))) setConfigValue(key, value);
+                }}>Reset generation defaults</Button>
+              </CollapsibleContent>
+              {Object.keys(errors).length ? <p role="alert" className="text-xs text-destructive">Check the values in Advanced generation before starting.</p> : null}
+            </Collapsible>
+          ) : null}
+          </div>
         ) : (
           <p className="text-xs text-muted-foreground">
             {catalogError ?? "Load the Catalog to configure a model."}

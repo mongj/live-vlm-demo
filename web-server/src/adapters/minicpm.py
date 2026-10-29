@@ -8,18 +8,19 @@ import logging
 import math
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import struct
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
 from websockets.asyncio.client import ClientConnection, connect
 
 from .base import Adapter
-from .minicpm_inputs import TypedAudioQueue, MicrophoneSegmenter
+from .minicpm_inputs import TypedAudioQueue, MicrophoneSegmenter, MicrophoneActivity
 from .minicpm_diagnostics import MiniCPMDiagnostics
 from ..speech_client import SpeechClient, SpeechUnavailable
 from ..input_events import AdapterEvent, SpeechCapabilities, InputStatus, InputTranscription
@@ -47,6 +48,31 @@ class MiniCPMConfig(BaseModel):
         le=9.0,
         title="Startup timeout (seconds)",
         description="Maximum wait for queue admission and session creation; bounded by the gateway's 10-second startup window.",
+    )
+    decode_mode: Literal["sampling", "greedy"] = Field(
+        default="sampling",
+        title="Decoding mode",
+        description="Text-token decoding for the next session; greedy does not make speech fully deterministic.",
+    )
+    temperature: float = Field(
+        default=0.7, strict=True, allow_inf_nan=False, ge=0.1, le=2.0,
+        title="Temperature",
+        description="Text sampling temperature; unused in greedy mode.",
+    )
+    top_p: float = Field(
+        default=0.8, strict=True, allow_inf_nan=False, ge=0.05, le=1.0,
+        title="Top-p",
+        description="Text nucleus-sampling threshold; 1 disables this filter. Unused in greedy mode.",
+    )
+    top_k: int = Field(
+        default=20, strict=True, ge=0, le=200,
+        title="Top-k",
+        description="Number of candidate text tokens; 0 disables this filter. Unused in greedy mode.",
+    )
+    length_penalty: float = Field(
+        default=1.1, strict=True, allow_inf_nan=False, ge=0.5, le=2.0,
+        title="Turn-length bias",
+        description="Above 1 encourages longer turns; below 1 encourages earlier endings. This is not a maximum token count.",
     )
 
 
@@ -138,6 +164,8 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
         self._tasks: list[asyncio.Task[None]] = []
         self._closing = False
         self._output_open = False
+        self._caption_counter = 0
+        self._caption_pair: tuple[str, str] | None = None
         self._drop_warned = False
         self._speech: SpeechClient | None = None
         self._speech_caps: SpeechCapabilities = {"version":1, "transcription":False, "typed_input":False,
@@ -148,6 +176,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
         self._asr_task: asyncio.Task[None] | None = None
         self._asr_pending: tuple[Any, int, int, int] | None = None
         self._segmenter = MicrophoneSegmenter()
+        self._microphone_activity = MicrophoneActivity()
         self._asr_epoch = 0
         self._voice_orders: dict[str, int] = {}
         self._seen_requests: set[str] = set()
@@ -229,10 +258,32 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                     "Do not invent changes or claim to see something that is unclear. "
                     "Give more detail only when requested."
                 )
+                reference_policy = (
+                    "The audio included in this system message is a voice reference only. "
+                    "Use its voice style, but do not repeat, transcribe, explain or answer its contents. "
+                    "Respond to the live user instead."
+                )
                 task_prompt = self.config.system_prompt.strip()
+                # Current Singapore time is UTC+08 with no daylight saving.
+                # Avoid an undeclared OS/tzdata dependency on Windows.
+                started_at = datetime.now(timezone(timedelta(hours=8), name="SGT"))
+                time_context = (
+                    f"Session-start date and time: {started_at:%Y-%m-%d %H:%M:%S} "
+                    "SGT (UTC+08:00), Asia/Singapore. This is a session-start snapshot, "
+                    "not a live clock. Do not invent the current time or use a date from training. "
+                    "If asked for the exact current time, explain that only the session-start time is available."
+                )
                 payload: dict[str, Any] = {"system_prompt": "\n\n".join(
-                    part for part in (task_prompt, english_policy, response_policy) if part
+                    part for part in (task_prompt, english_policy, response_policy, time_context, reference_policy) if part
                 )}
+                # Native reuses its view config: send defaults too, on every session.
+                payload["config"] = {
+                    "decode_mode": self.config.decode_mode,
+                    "temperature": self.config.temperature,
+                    "top_p": self.config.top_p,
+                    "top_k": self.config.top_k,
+                    "length_penalty": self.config.length_penalty,
+                }
                 await ws.send(json.dumps({"type": "session.init", "payload": payload}))
                 continue
             if kind == "session.created" and queued:
@@ -249,7 +300,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
             raise SessionError("MiniCPM typed text is not supported in live-video mode; speak through the microphone", fatal=False)
 
     def speech_capabilities(self) -> SpeechCapabilities:
-        return self._speech_caps
+        return {**self._speech_caps, "spoken_interruption": True}
 
     def _next_order(self) -> int:
         self._turn_order += 1
@@ -271,6 +322,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
         if self._typed_finishing:
             raise SessionError("A typed instruction is already being sent", fatal=False)
         self._typed.begin(request_id)
+        self._microphone_activity.clear()
         self._seen_requests.add(request_id)
         self._typed_order = self._next_order()
         self._audio.clear()
@@ -300,7 +352,14 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                     detail="Typed speech unavailable or over 30 seconds; edit and send again"))
 
     def offer_microphone(self, pcm: bytes, *, generation: int, sequence: int, enabled: bool) -> None:
-        if self._closing or not self._speech_caps["transcription"]:
+        if self._closing:
+            return
+        self._microphone_activity.offer(
+            pcm, generation=generation, sequence=sequence,
+            enabled=enabled and not self._typed.busy and not self._typed_finishing,
+            now=time.monotonic(),
+        )
+        if not self._speech_caps["transcription"]:
             return
         if generation < self._segmenter.generation:
             return
@@ -406,12 +465,19 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                 frame = self._frame
                 self._frame = None
                 body: dict[str, Any] = {"audio": base64.b64encode(s16le_to_f32le(pcm)).decode("ascii"), "max_slice_nums": 1}
-                if force_listen:
+                force_source = "typed" if force_listen else (
+                    "microphone" if self._microphone_activity.take_force_listen(time.monotonic()) else "none")
+                if force_source != "none":
                     body["force_listen"] = True
                 if frame is not None:
                     body["video_frames"] = [base64.b64encode(frame.jpeg).decode("ascii")]
+                # The native protocol echoes this opaque ID on listen/text/audio.
+                # It is metadata, not a prompt, and adds no model input tokens.
+                body["input_id"] = self._diagnostics.register_input(
+                    audio_bytes=genuine_bytes, frames=int(frame is not None), force_source=force_source)
                 await ws.send(json.dumps({"type": "input.append", "input": body}))
-                self._diagnostics.sent(audio_bytes=genuine_bytes, frames=int(frame is not None))
+                self._diagnostics.sent(audio_bytes=genuine_bytes, frames=int(frame is not None),
+                                       force_listen=body.get("force_listen") is True)
                 self._diagnostics.emit(self._diagnostic_replies, "input_sent")
                 if final_typed_packet and typed_id is not None and not self._closing:
                     self._audio.clear()
@@ -468,6 +534,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
     def _delta_reply(self, event: dict[str, Any]) -> Reply | None:
         kind = event.get("kind")
         if kind == "listen":
+            self._caption_pair = None
             self._diagnostics.output(kind, event)
             self._diagnostics.emit(self._diagnostic_replies, "model_output")
             if not self._output_open:
@@ -484,7 +551,14 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
             self._diagnostics.emit(self._diagnostic_replies, "model_output")
             if not self._output_open: self._assistant_order = self._next_order()
             self._output_open = True
-            return Reply(text=text, raw=text, t=self._last_t, turn_order=self._assistant_order)
+            self._caption_counter += 1
+            response_id, input_id = event.get("response_id"), event.get("input_id")
+            self._caption_pair = (response_id, input_id) if (
+                isinstance(response_id, str) and 0 < len(response_id) <= 128
+                and isinstance(input_id, str) and 0 < len(input_id) <= 128
+            ) else None
+            return Reply(text=text, raw=text, t=self._last_t, turn_order=self._assistant_order,
+                         caption_unit=self._caption_counter if self._caption_pair else None)
         if kind == "audio":
             encoded = event.get("audio")
             if not isinstance(encoded, str):
@@ -500,7 +574,10 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
             self._diagnostics.emit(self._diagnostic_replies, "model_output")
             if not self._output_open: self._assistant_order = self._next_order()
             self._output_open = True
-            return Reply(audio=pcm, t=self._last_t, turn_order=self._assistant_order)
+            pair = (event.get("response_id"), event.get("input_id"))
+            unit = self._caption_counter if self._caption_pair is not None and pair == self._caption_pair else None
+            self._caption_pair = None
+            return Reply(audio=pcm, t=self._last_t, turn_order=self._assistant_order, caption_unit=unit)
         raise SessionError(f"MiniCPM unknown output delta kind: {kind}", fatal=True)
 
     async def read_replies(self) -> AsyncIterator[Reply]:
@@ -539,6 +616,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
             self._diagnostics.emit(self._diagnostic_replies, "closed", stage="closed", force=True)
         self._closing = True
         self._typed.cancel()
+        self._microphone_activity.clear()
         self._typed_finishing = False
         self._invalidate_asr()
         self._frame = None

@@ -1,9 +1,12 @@
 export type MicrophoneMode = "push-to-talk" | "always-listening";
+export type CaptionSize = "compact" | "normal" | "large";
 
 type PreferenceValues = {
   microphoneMode: MicrophoneMode;
   modelVolume: number;
   captionsEnabled: boolean;
+  captionSize: CaptionSize;
+  captionBackgroundOpacity: number;
 };
 type PreferenceName = keyof PreferenceValues;
 
@@ -11,6 +14,8 @@ const DEFAULTS: PreferenceValues = {
   microphoneMode: "push-to-talk",
   modelVolume: 1,
   captionsEnabled: true,
+  captionSize: "compact",
+  captionBackgroundOpacity: 0.5,
 };
 
 function validPreference(name: PreferenceName, value: unknown): value is PreferenceValues[PreferenceName] {
@@ -18,9 +23,12 @@ function validPreference(name: PreferenceName, value: unknown): value is Prefere
     case "microphoneMode":
       return value === "push-to-talk" || value === "always-listening";
     case "modelVolume":
+    case "captionBackgroundOpacity":
       return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
     case "captionsEnabled":
       return typeof value === "boolean";
+    case "captionSize":
+      return value === "compact" || value === "normal" || value === "large";
     default:
       return false;
   }
@@ -29,6 +37,8 @@ function validPreference(name: PreferenceName, value: unknown): value is Prefere
 export function readPreference(name: "microphoneMode"): MicrophoneMode;
 export function readPreference(name: "modelVolume"): number;
 export function readPreference(name: "captionsEnabled"): boolean;
+export function readPreference(name: "captionSize"): CaptionSize;
+export function readPreference(name: "captionBackgroundOpacity"): number;
 export function readPreference(name: PreferenceName): PreferenceValues[PreferenceName] {
   try {
     if (typeof window !== "undefined") {
@@ -45,6 +55,8 @@ export function readPreference(name: PreferenceName): PreferenceValues[Preferenc
 export function writePreference(name: "microphoneMode", value: MicrophoneMode): void;
 export function writePreference(name: "modelVolume", value: number): void;
 export function writePreference(name: "captionsEnabled", value: boolean): void;
+export function writePreference(name: "captionSize", value: CaptionSize): void;
+export function writePreference(name: "captionBackgroundOpacity", value: number): void;
 export function writePreference(name: PreferenceName, value: PreferenceValues[PreferenceName]): void {
   if (!validPreference(name, value)) return;
   try {

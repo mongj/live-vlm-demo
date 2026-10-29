@@ -4,13 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { DebugRawEntry, PlaygroundState } from "@/hooks/use-playground";
 import type { PlaybackDiagnostics } from "@/lib/playback-diagnostics.mjs";
 import type { RuntimeDiagnosticEntry } from "@/lib/runtime-diagnostics.mjs";
 import type { FrameRateSnapshot } from "@/lib/frame-rates";
 import { cn } from "@/lib/utils";
-import { ArrowLeftIcon, DownloadIcon, FlagIcon } from "lucide-react";
-import { useState } from "react";
+import { ArrowLeftIcon, DownloadIcon, FlagIcon, ScanLineIcon } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 
 type DebugPanelProps = {
   entries: DebugRawEntry[];
@@ -28,6 +29,8 @@ type DebugPanelProps = {
   onDownloadSavedLog?: (startedAt:number) => void;
   onClearSavedLogs?: () => void;
   onMarkIssue: () => void;
+  onMarkStateChange: () => void;
+  stateChangeShortcutHeld: boolean;
   onDownloadLog: () => void;
   onBack?: () => void;
 };
@@ -81,8 +84,37 @@ function eventCategory(event: string): DebugCategory {
   }
 }
 
-export function DebugPanel({ entries, playback, diagnostics, active, frameRates, targetFps, sessionLogSummary, savedSessionLogs, savedLogDownloadStatus, includeTranscript, transcriptChoiceLocked, onIncludeTranscript, onDownloadSavedLog, onClearSavedLogs, onMarkIssue, onDownloadLog, onBack }: DebugPanelProps) {
+function DebugActionHint({label,children}:{label:string;children:ReactNode}) {
+  return <Tooltip><TooltipTrigger asChild><span className="inline-flex">{children}</span></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>;
+}
+
+export function DebugPanel({ entries, playback, diagnostics, active, frameRates, targetFps, sessionLogSummary, savedSessionLogs, savedLogDownloadStatus, includeTranscript, transcriptChoiceLocked, onIncludeTranscript, onDownloadSavedLog, onClearSavedLogs, onMarkIssue, onMarkStateChange, stateChangeShortcutHeld, onDownloadLog, onBack }: DebugPanelProps) {
   const [filter, setFilter] = useState<DebugFilter>("all");
+  const [issueKeyHeld, setIssueKeyHeld] = useState(false);
+  const [issuePointerHeld, setIssuePointerHeld] = useState(false);
+  const canMarkIssue = active && !!sessionLogSummary && !sessionLogSummary.terminal;
+  useEffect(() => {
+    const releasePointer = () => setIssuePointerHeld(false);
+    const release = () => { setIssueKeyHeld(false); releasePointer(); };
+    const releaseKey = (event: KeyboardEvent) => {
+      if (event.key === " " || event.key === "Enter") setIssueKeyHeld(false);
+    };
+    window.addEventListener("blur", release);
+    window.addEventListener("keyup", releaseKey);
+    window.addEventListener("pointerup", releasePointer);
+    window.addEventListener("pointercancel", releasePointer);
+    return () => {
+      window.removeEventListener("blur", release);
+      window.removeEventListener("keyup", releaseKey);
+      window.removeEventListener("pointerup", releasePointer);
+      window.removeEventListener("pointercancel", releasePointer);
+    };
+  }, []);
+  const issueCount = sessionLogSummary?.issueCount ?? 0;
+  const changeCount = sessionLogSummary?.stateChangeCount ?? 0;
+  const downloadHint = sessionLogSummary?.terminal
+    ? "Session ended · download from Saved session logs below"
+    : sessionLogSummary ? "Download a snapshot of the current session" : "Start a session to collect a log";
   const latest = diagnostics.at(-1)?.snapshot;
   const filteredDiagnostics = diagnostics.filter(entry => filter === "all" || eventCategory(entry.snapshot.event) === filter);
   const showRawOutput = filter === "all" || filter === "output";
@@ -99,9 +131,11 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
     <aside className="flex h-full min-h-0 min-w-0 flex-col bg-background">
       <div className={cn("flex min-w-0 flex-wrap items-center gap-1", onBack ? "px-3 py-2" : "px-4 py-3")}>
         {onBack ? (
+          <DebugActionHint label="Back to transcript">
           <Button aria-label="Back to transcript" onClick={onBack} size="icon-sm" type="button" variant="ghost">
             <ArrowLeftIcon />
           </Button>
+          </DebugActionHint>
         ) : null}
         <p className="shrink-0 text-sm font-medium">Debug</p>
         <Select value={filter} onValueChange={value => {
@@ -121,14 +155,42 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
             </SelectGroup>
           </SelectContent>
         </Select>
-        <Button aria-label="Mark issue" title="Mark issue in this session" disabled={!active || !sessionLogSummary}
+        <DebugActionHint label="Mark issue">
+        <Button aria-label="Mark issue" disabled={!canMarkIssue}
+          className={cn("transition-none", (issueKeyHeld || issuePointerHeld) && canMarkIssue
+              ? "bg-debug-input/10 text-debug-input hover:text-debug-input [&_svg]:fill-current"
+              : "text-muted-foreground hover:text-muted-foreground")}
+          onPointerDown={event => { if (event.button === 0) setIssuePointerHeld(true); }}
+          onPointerLeave={() => setIssuePointerHeld(false)}
+          onKeyDown={event => {
+            if (event.key !== " " && event.key !== "Enter") return;
+            if (event.repeat) event.preventDefault();
+            else setIssueKeyHeld(true);
+          }}
+          onBlur={() => { setIssueKeyHeld(false); setIssuePointerHeld(false); }}
           onClick={onMarkIssue} size="icon-sm" type="button" variant="ghost">
-          <FlagIcon aria-hidden />
+          <FlagIcon aria-hidden fill="none" />
         </Button>
-        <Button aria-label="Download current session log" title="Download current session log" disabled={!sessionLogSummary || sessionLogSummary.terminal}
+        </DebugActionHint>
+        <DebugActionHint label="Mark change · Shift+M">
+          <Button aria-label="Mark change" aria-keyshortcuts="Shift+M" disabled={!canMarkIssue}
+            className={cn("transition-none active:bg-debug-input/10 active:text-debug-input",stateChangeShortcutHeld
+              ? "bg-debug-input/10 text-debug-input" : "text-muted-foreground")}
+            onKeyDown={event=>{if (event.repeat && (event.key === " " || event.key === "Enter")) event.preventDefault();}}
+            onClick={onMarkStateChange} size="icon-sm" type="button" variant="ghost">
+            <ScanLineIcon aria-hidden />
+          </Button>
+        </DebugActionHint>
+        <DebugActionHint label={`Download current session log · ${downloadHint}`}>
+        <Button aria-label="Download current session log" disabled={!sessionLogSummary || sessionLogSummary.terminal}
           onClick={onDownloadLog} size="icon-sm" type="button" variant="ghost">
           <DownloadIcon aria-hidden />
         </Button>
+        </DebugActionHint>
+        <p role="status" aria-live="polite" aria-atomic="true" className="w-full text-xs text-debug-input">
+          {[issueCount > 0 ? `Issue #${issueCount} marked` : "",changeCount > 0 ? `Change #${changeCount} marked` : ""].filter(Boolean).join(" · ")}
+        </p>
+        {sessionLogSummary?.terminal ? <p className="w-full text-xs text-muted-foreground">{downloadHint}</p> : null}
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {savedSessionLogs ? (
@@ -152,7 +214,7 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
                 <div key={log.startedAt} className="flex min-w-0 flex-wrap items-center justify-between gap-1 py-1">
                   <div className="min-w-0 break-words">
                     <time dateTime={new Date(log.startedAt).toISOString()}>{new Date(log.startedAt).toLocaleString()}</time>
-                    <p>{log.events.length} events · {log.issueCount} issues{log.transcriptEnabled ? " · transcript included" : " · no transcript"}{log.truncated || log.transcript?.truncated ? " · truncated" : ""}</p>
+                    <p>{log.events.length} events · {log.issueCount} issues · {log.stateChangeCount} changes{log.transcriptEnabled ? " · transcript included" : " · no transcript"}{log.truncated || log.transcript?.truncated ? " · truncated" : ""}</p>
                   </div>
                   <Button aria-label={`Download session log from ${new Date(log.startedAt).toLocaleString()}`} onClick={()=>onDownloadSavedLog?.(log.startedAt)} size="sm" type="button" variant="outline">Download</Button>
                 </div>
@@ -165,7 +227,7 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
         {sessionLogSummary ? (
           <div className="border-b px-4 pb-3 text-xs text-muted-foreground">
             <details>
-              <summary className="cursor-pointer py-1">Session log · {sessionLogSummary.eventCount} events · {sessionLogSummary.issueCount} issues</summary>
+              <summary className="cursor-pointer py-1">Session log · {sessionLogSummary.eventCount} events · {sessionLogSummary.issueCount} issues · {sessionLogSummary.stateChangeCount} changes</summary>
               <p>{sessionLogSummary.terminal ? "Session ended" : "Current session"} · {sessionLogSummary.transcriptEnabled ? "transcript included" : "diagnostics only"}; no audio or video recording.</p>
             </details>
             {sessionLogSummary.downloadStatus !== "Not downloaded" ? (
@@ -195,6 +257,20 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
               </div>)}
             </dl> : <p>Not reported.</p>}
             {frameRateReadings}
+            {latest.native ? <details>
+              <summary className="cursor-pointer py-1">Input/output tracing</summary>
+              <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1">
+                <dt>Latest native output</dt><dd>{latest.native.kind}</dd>
+                <dt>Consecutive listen events</dt><dd>{latest.native.listen_streak}</dd>
+                {latest.native.since_content_ms !== undefined ? <><dt>Since text/audio received</dt><dd>{(latest.native.since_content_ms/1000).toFixed(1)} s</dd></> : null}
+                <dt>Matched input packet</dt><dd>{latest.native.matched ? `#${latest.native.input_sequence}` : "Unknown"}</dd>
+                {latest.native.matched ? <>
+                  <dt>Forced listen for that input</dt><dd>{latest.native.force_listen ? latest.native.force_source : "No"}</dd>
+                  <dt>Input send → output received</dt><dd>{((latest.native.input_age_ms ?? 0)/1000).toFixed(2)} s</dd>
+                </> : null}
+              </dl>
+              <p>Sampled latest output; send-to-output includes transport, queue and processing. A listen event can also end a reply.</p>
+            </details> : null}
             <details>
               <summary className="cursor-pointer py-1">Recent events ({filter === "all" ? diagnostics.length : `${filteredDiagnostics.length} of ${diagnostics.length}`}, latest 120)</summary>
               <div className="flex max-h-48 flex-col gap-1 overflow-auto">

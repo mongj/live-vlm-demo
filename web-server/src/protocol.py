@@ -70,6 +70,8 @@ class ResponseChunkMessage(BaseModel):
     t: float | None = None
     turn_order: int | None = None
     diagnostic: dict[str, Any] | None = None
+    # Opaque sequence pairing native generation-unit text with its audio.
+    caption_unit: int | None = None
 
 
 class InputTypedMessage(BaseModel):

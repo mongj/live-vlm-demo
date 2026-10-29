@@ -59,8 +59,7 @@ export function guidanceView(state, sessionLive, cameraView) {
 export function guidanceBoxStyle(fileActive) {
   return {
     width: "max-content",
-    maxWidth: "min(18rem, 75%)",
-    minWidth: "min(8rem, 75%)",
+    maxWidth: "min(32rem, 90%)",
     bottom: fileActive ? "4rem" : "1rem",
     left: "50%",
     transform: "translateX(-50%)",

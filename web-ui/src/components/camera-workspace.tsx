@@ -4,6 +4,8 @@ import { VideoPlaybackControls } from "@/components/video-playback-controls";
 import { Button } from "@/components/ui/button";
 import { guidanceBoxStyle, guidanceView, videoSessionView, type GuidanceState } from "@/lib/assistant-guidance.mjs";
 import { createStageFullscreen, type StageFullscreenState } from "@/lib/stage-fullscreen.mjs";
+import type { SessionStatusBadge } from "@/lib/session-status";
+import type { CaptionSize } from "@/lib/playground-preferences";
 import type { CameraViewState, VideoSourceKind } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
 import type { VideoRecord } from "@/lib/video-library/types";
@@ -23,7 +25,11 @@ type CameraWorkspaceProps = {
   guidance: GuidanceState | null;
   inputCaption?: {text:string;label:string;streaming:boolean} | null;
   captionsEnabled?: boolean;
+  captionSize?: CaptionSize;
+  captionBackgroundOpacity?: number;
   sessionNotice: string | null;
+  sessionBadge?: SessionStatusBadge;
+  sessionStartedAtMonotonicMs?: number | null;
   onFullscreenLayoutLock: (locked: boolean) => void;
   stageClassName?: string;
   controlBar: ReactNode;
@@ -135,9 +141,38 @@ function showCameraVideo(view: CameraViewState): boolean {
   }
 }
 
-function cameraStatusDotClass(sessionLive: boolean): string {
-  return sessionLive ? "bg-destructive" : "bg-primary";
+const sessionBadgeColors: Record<SessionStatusBadge["tone"], string> = {
+  idle: "text-slate-200",
+  listening: "text-sky-200",
+  watching: "text-cyan-200",
+  preparing: "text-violet-200",
+  sending: "text-blue-200",
+  waiting: "text-amber-200",
+  responding: "text-emerald-200",
+  error: "text-red-200",
+};
+
+function SessionElapsed({ startedAtMonotonicMs }: { startedAtMonotonicMs: number }) {
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    const update = () => setNow(performance.now());
+    const timer = window.setInterval(update, 1000);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAtMonotonicMs) / 1000));
+  const elapsed = `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+  return <span aria-label={`Session elapsed ${elapsed}`} aria-live="off" className="shrink-0 tabular-nums" role="timer">{elapsed}</span>;
 }
+
+const captionSizeClasses: Record<CaptionSize, string> = {
+  compact: "text-[12px]",
+  normal: "text-[14px]",
+  large: "text-[16px]",
+};
 
 function previewAttachKind(
   previewStream: MediaStream | null,
@@ -208,7 +243,11 @@ export function CameraWorkspace({
   guidance,
   inputCaption,
   captionsEnabled = true,
+  captionSize = "compact",
+  captionBackgroundOpacity = 0.5,
   sessionNotice,
+  sessionBadge,
+  sessionStartedAtMonotonicMs = null,
   onFullscreenLayoutLock,
   stageClassName,
   controlBar,
@@ -305,6 +344,21 @@ export function CameraWorkspace({
               assignRef(videoRef, node);
             }}
           />
+          {sessionBadge ? (
+            <div
+              className={cn("pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-4.5rem)] items-center gap-1.5 rounded-full border border-white/20 bg-black/50 px-2 py-1 text-[10px] leading-3 font-medium", sessionBadgeColors[sessionBadge.tone])}
+              data-slot="video-session-status"
+            >
+              <span className="flex min-w-0 items-center gap-1.5" role="status" aria-live="polite" aria-atomic="true">
+                <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full bg-current", sessionBadge.tone !== "idle" && sessionBadge.tone !== "error" && "animate-pulse motion-reduce:animate-none")} />
+                <span className="truncate">{sessionBadge.label}</span>
+              </span>
+              {sessionLive && sessionStartedAtMonotonicMs !== null ? <>
+                <span aria-hidden="true">·</span>
+                <SessionElapsed key={sessionStartedAtMonotonicMs} startedAtMonotonicMs={sessionStartedAtMonotonicMs} />
+              </> : null}
+            </div>
+          ) : null}
           <Button
             aria-label={fullscreenLabel}
             aria-pressed={enlarged}
@@ -329,13 +383,14 @@ export function CameraWorkspace({
           ) : null}
           {captionsEnabled && guidanceDisplay ? (
             <div
-              className={cn("pointer-events-none absolute z-30 rounded-lg border border-white/20 px-2 py-1.5 text-white shadow-lg", inputCaption ? "bg-blue-950/95" : "bg-black/90")}
+              className={cn("pointer-events-none absolute z-30 rounded-lg border border-white/20 px-2 py-1 text-white shadow-lg", inputCaption ? "bg-blue-950/50" : "bg-black/50")}
               data-slot="assistant-guidance"
               data-speaker={inputCaption ? 'user' : 'assistant'}
-              style={guidanceBoxStyle(fileActive)}
+              style={{...guidanceBoxStyle(fileActive), backgroundColor: inputCaption
+                ? `color-mix(in oklab, var(--color-blue-950) ${captionBackgroundOpacity * 100}%, transparent)`
+                : `rgba(0, 0, 0, ${captionBackgroundOpacity})`}}
             >
-              <p className="mb-0.5 text-[8px] font-medium tracking-wide text-white/70 uppercase">{guidanceDisplay.label}</p>
-              <p className="line-clamp-2 text-[12px] leading-[1.3] font-medium wrap-anywhere">{guidanceDisplay.text}</p>
+              <p className={cn("leading-[1.4] font-medium whitespace-pre-wrap break-normal [overflow-wrap:break-word]", captionSizeClasses[captionSize], inputCaption && "line-clamp-3")}>{guidanceDisplay.text}</p>
               <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
                 {guidanceDisplay.streaming ? "" : `${guidanceDisplay.label}: ${guidanceDisplay.text}`}
               </p>
@@ -343,7 +398,7 @@ export function CameraWorkspace({
           ) : null}
           {sessionStatus.error ? (
             <div
-              className="absolute top-3 left-3 z-30 max-h-[45%] w-max max-w-[min(20rem,calc(100%-4.5rem))] overflow-y-auto rounded-lg border border-red-300/30 bg-black/90 px-2.5 py-2 text-white shadow-lg focus-visible:outline focus-visible:outline-white"
+              className="absolute top-11 left-3 z-30 max-h-[45%] w-max max-w-[min(20rem,calc(100%-4.5rem))] overflow-y-auto rounded-lg border border-red-300/30 bg-black/90 px-2.5 py-2 text-white shadow-lg focus-visible:outline focus-visible:outline-white"
               data-slot="video-session-error"
               role="alert"
               tabIndex={0}
@@ -352,20 +407,14 @@ export function CameraWorkspace({
               <p className="mt-1 text-[11px] leading-4 wrap-anywhere">{sessionStatus.error}</p>
               {fullscreen.notice ? <p className="mt-2 text-[11px] leading-4 text-white/70" role="status">{fullscreen.notice}</p> : null}
             </div>
-          ) : cameraView === "live" ? (
+          ) : cameraView === "live" && fileActive && activeVideo ? (
             <div
               className={cn(
-                "pointer-events-none absolute top-3 left-3 z-10 flex max-w-[calc(100%-4.5rem)] items-center gap-2 rounded-full bg-background/80 px-2.5 py-1 text-xs opacity-0 transition-opacity duration-200 group-has-focus-visible/stage:opacity-100",
-                fileActive
-                  ? "group-has-[[data-slot=playback-overlay][data-visible=true]]/stage:opacity-100"
-                  : "group-hover/stage:opacity-100"
+                "pointer-events-none absolute top-10 left-3 z-10 flex max-w-[calc(100%-4.5rem)] items-center rounded-full bg-background/80 px-2.5 py-1 text-xs opacity-0 transition-opacity duration-200 group-has-focus-visible/stage:opacity-100",
+                "group-has-[[data-slot=playback-overlay][data-visible=true]]/stage:opacity-100"
               )}
             >
-              <span className={cn("size-1.5 shrink-0 rounded-full", cameraStatusDotClass(sessionLive))} />
-              <span className="shrink-0">{sessionStatus.label}</span>
-              {fileActive && activeVideo ? (
-                <span className="truncate text-muted-foreground">{activeVideo.name}</span>
-              ) : null}
+              <span className="truncate text-muted-foreground">{activeVideo.name}</span>
             </div>
           ) : null}
           {overlay ? (

@@ -1,9 +1,11 @@
 /** Content-free snapshots, kept separate from model text and transcript turns.
  * @typedef {{version:1,event:string,elapsed_ms:number,stage:string,
- * input:{packets:number,frames:number,audio_ms:number,dropped_audio_ms:number},
+ * input:{packets:number,frames:number,audio_ms:number,dropped_audio_ms:number,last_force_listen?:boolean,forced_listen_packets?:number},
  * output:{text_chunks:number,audio_chunks:number,audio_ms:number},
  * speech:{transcription:boolean,typed_input:boolean,asr_ms?:number,tts_ms?:number},
- * metrics?:Record<string,number>,chunk_index?:number}} RuntimeDiagnostic
+ * metrics?:Record<string,number>,chunk_index?:number,
+ * native?:{kind:string,matched:boolean,listen_events:number,listen_streak:number,since_content_ms?:number,
+ * input_sequence?:number,input_age_ms?:number,input_frames?:number,input_audio_ms?:number,force_listen?:boolean,force_source?:string}}} RuntimeDiagnostic
  * @typedef {{receivedAt:number,snapshot:RuntimeDiagnostic}} RuntimeDiagnosticEntry
  */
 
@@ -36,9 +38,26 @@ export function parseRuntimeDiagnostic(value) {
     input:{packets:input.packets,frames:input.frames,audio_ms:input.audio_ms,dropped_audio_ms:input.dropped_audio_ms},
     output:{text_chunks:output.text_chunks,audio_chunks:output.audio_chunks,audio_ms:output.audio_ms},
     speech:{transcription:speech.transcription,typed_input:speech.typed_input}};
+  // Adapter send decisions only; these do not establish native model state.
+  if (typeof input.last_force_listen === 'boolean') result.input.last_force_listen = input.last_force_listen;
+  if (count(input.forced_listen_packets)) result.input.forced_listen_packets = input.forced_listen_packets;
   if (number(speech.asr_ms)) result.speech.asr_ms = speech.asr_ms;
   if (number(speech.tts_ms)) result.speech.tts_ms = speech.tts_ms;
   if (count(value.chunk_index)) result.chunk_index = value.chunk_index;
+  // Only an echoed native ID establishes an input match. Older runtimes or
+  // evicted IDs stay unknown; never substitute the latest sent control flag.
+  const native = value.native;
+  if (record(native) && ['listen','text','audio'].includes(native.kind)
+    && typeof native.matched === 'boolean' && count(native.listen_events) && count(native.listen_streak)) {
+    result.native = {kind:native.kind,matched:false,listen_events:native.listen_events,listen_streak:native.listen_streak};
+    if (number(native.since_content_ms)) result.native.since_content_ms = native.since_content_ms;
+    if (native.matched && count(native.input_sequence) && number(native.input_age_ms)
+      && count(native.input_frames) && number(native.input_audio_ms) && typeof native.force_listen === 'boolean'
+      && ['none','typed','microphone'].includes(native.force_source)) {
+      Object.assign(result.native,{matched:true,input_sequence:native.input_sequence,input_age_ms:native.input_age_ms,
+        input_frames:native.input_frames,input_audio_ms:native.input_audio_ms,force_listen:native.force_listen,force_source:native.force_source});
+    }
+  }
   if (record(value.metrics)) {
     const metrics = Object.fromEntries(METRICS.flatMap(key => number(value.metrics[key]) ? [[key,value.metrics[key]]] : []));
     if (Object.keys(metrics).length) result.metrics = metrics;

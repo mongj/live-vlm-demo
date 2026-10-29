@@ -33,14 +33,45 @@ class MiniCPMDiagnostics:
         self.speech: dict[str, Any] = {"transcription": False, "typed_input": False}
         self.metrics: dict[str, int | float] = {}
         self.chunk_index: int | float | None = None
+        self._input_sequence = 0
+        self._inputs: dict[str, dict[str, Any]] = {}
+        self._native: dict[str, Any] | None = None
+        self._listen_events = 0
+        self._listen_streak = 0
+        self._last_content_at: float | None = None
         self._last_emit = -math.inf
 
-    def sent(self, *, audio_bytes: int, frames: int) -> None:
+    def register_input(self, *, audio_bytes: int, frames: int, force_source: str) -> str:
+        """Bounded metadata keyed by the protocol's echoed input_id; no media.
+
+        Register before awaiting send so a fast response cannot race the mapping.
+        Age starts before send, therefore includes transport/queue/model time.
+        This is not a native receipt timestamp or an inference-only latency.
+        """
+        if force_source not in {"none", "typed", "microphone"}:
+            raise ValueError("Unknown force-listen source")
+        self._input_sequence += 1
+        input_id = f"diag-{self._input_sequence}"
+        self._inputs[input_id] = {
+            "input_sequence": self._input_sequence, "input_frames": frames,
+            "input_audio_ms": audio_bytes / 32, "force_listen": force_source != "none",
+            "force_source": force_source, "sent_at": time.monotonic(),
+        }
+        if len(self._inputs) > 256:
+            del self._inputs[next(iter(self._inputs))]
+        return input_id
+
+    def sent(self, *, audio_bytes: int, frames: int, force_listen: bool | None = None) -> None:
         # 16 kHz signed16 PCM supplied by the client/TTS, BEFORE packet padding.
         # Silence supplied by the client still counts; this is not speech time.
         self.input["packets"] += 1
         self.input["frames"] += frames
         self.input["audio_ms"] += audio_bytes / 32
+        # Last successfully sent packet, not native receipt or processing state.
+        # Optional so older callers/snapshots do not invent a control decision.
+        if type(force_listen) is bool:
+            self.input["last_force_listen"] = force_listen
+            self.input["forced_listen_packets"] = self.input.get("forced_listen_packets", 0) + int(force_listen)
 
     def dropped(self, audio_bytes: int) -> None:
         # Adapter jitter overflow only; browser/shared-buffer loss is not observed here.
@@ -49,6 +80,20 @@ class MiniCPMDiagnostics:
     def output(self, kind: str, event: dict[str, Any], *, audio_bytes: int = 0) -> None:
         if kind not in {"listen", "text", "audio"}:
             return
+        now = time.monotonic()
+        if kind == "listen":
+            self._listen_events += 1
+            self._listen_streak += 1
+        else:
+            self._listen_streak = 0
+            self._last_content_at = now
+        input_id = event.get("input_id")
+        matched = self._inputs.get(input_id) if isinstance(input_id, str) else None
+        self._native = {"kind": kind, "matched": matched is not None,
+                        "listen_events": self._listen_events, "listen_streak": self._listen_streak}
+        if matched is not None:
+            self._native.update({key: value for key, value in matched.items() if key != "sent_at"})
+            self._native["input_age_ms"] = max(0.0, (now - matched["sent_at"]) * 1000)
         self.stage = "listening" if kind == "listen" else "responding"
         if kind == "text": self.output_counts["text_chunks"] += 1
         if kind == "audio":
@@ -74,6 +119,10 @@ class MiniCPMDiagnostics:
         }
         if self.metrics: result["metrics"] = dict(self.metrics)
         if self.chunk_index is not None: result["chunk_index"] = self.chunk_index
+        if self._native is not None:
+            result["native"] = dict(self._native)
+            if self._last_content_at is not None:
+                result["native"]["since_content_ms"] = max(0.0, (time.monotonic() - self._last_content_at) * 1000)
         return result
 
     def emit(self, queue: asyncio.Queue[Any], event: str, *, stage: str | None = None,

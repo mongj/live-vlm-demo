@@ -74,6 +74,7 @@ class ClientChannel:
             interrupted=reply.interrupted,
             t=reply.t,
             turn_order=reply.turn_order,
+            caption_unit=reply.caption_unit,
             diagnostic=reply.diagnostic,
         )
         payload = message.model_dump()
@@ -81,6 +82,8 @@ class ClientChannel:
             payload.pop("diagnostic", None)
         if reply.turn_order is None:
             payload.pop("turn_order")
+        if reply.caption_unit is None:
+            payload.pop("caption_unit")
         if reply.t is None:
             payload.pop("t", None)
         if not reply.interrupted:

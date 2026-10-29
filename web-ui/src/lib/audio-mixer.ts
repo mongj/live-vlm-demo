@@ -88,6 +88,7 @@ export class AudioMixer {
   private speechWindowSamples = 0;
   private speechWindowEnergy = 0;
   private speechActiveSamples = 0;
+  private speechHistory: number[] = [];
   private speechQuietSamples = 0;
   private speechLatched = false;
   private workletUrl: string | null = null;
@@ -98,7 +99,8 @@ export class AudioMixer {
   constructor(
     private readonly onChunk: (pcm: Uint8Array) => void,
     private readonly onSpeechStart?: () => void,
-    private readonly onMicrophoneChunk?: (pcm: Uint8Array) => void
+    private readonly onMicrophoneChunk?: (pcm: Uint8Array) => void,
+    private readonly onSpeechEnd?: () => void
   ) {}
 
   async start(): Promise<void> {
@@ -337,12 +339,15 @@ export class AudioMixer {
   }
 
   private resetSpeechOnset(): void {
+    const wasActive = this.speechLatched;
     this.speechSampleRate = 0;
     this.speechWindowSamples = 0;
     this.speechWindowEnergy = 0;
     this.speechActiveSamples = 0;
+    this.speechHistory = [];
     this.speechQuietSamples = 0;
     this.speechLatched = false;
+    if (wasActive) this.onSpeechEnd?.();
   }
 
   private detectSpeechOnset(speech: Float32Array, sampleRate: number): void {
@@ -365,17 +370,26 @@ export class AudioMixer {
       const rms = Math.sqrt(this.speechWindowEnergy / this.speechWindowSamples);
       this.speechWindowEnergy = 0;
       this.speechWindowSamples = 0;
+      // Keep only 30 classified 10ms windows, never microphone PCM. Small
+      // pauses may occur within speech, but old isolated sounds must expire.
+      const hotSamples = rms >= BARGE_IN_RMS_THRESHOLD ? windowSamples : 0;
+      this.speechHistory.push(hotSamples);
+      this.speechActiveSamples += hotSamples;
+      if (this.speechHistory.length > 30) {
+        this.speechActiveSamples -= this.speechHistory.shift()!;
+      }
       if (rms >= BARGE_IN_RMS_THRESHOLD) {
         this.speechQuietSamples = 0;
-        this.speechActiveSamples = Math.min(onsetSamples, this.speechActiveSamples + windowSamples);
         if (!this.speechLatched && this.speechActiveSamples >= onsetSamples) {
           this.speechLatched = true;
           this.onSpeechStart?.();
         }
       } else {
-        this.speechActiveSamples = 0;
         this.speechQuietSamples = Math.min(rearmSamples, this.speechQuietSamples + windowSamples);
-        if (this.speechQuietSamples >= rearmSamples) this.speechLatched = false;
+        if (this.speechLatched && this.speechQuietSamples >= rearmSamples) {
+          this.speechLatched = false;
+          this.onSpeechEnd?.();
+        }
       }
     }
   }
