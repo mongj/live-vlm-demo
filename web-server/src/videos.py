@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any
@@ -59,6 +61,10 @@ def resolve_video_roots(
         raw = env.get(env_name)
         roots[key] = Path(raw) if raw else default
     return roots
+
+
+# A SPOT-Bench clip's name starts with its task, whose annotations are in `<task>.renamed.json`.
+SPOT_BENCH_TASKS = frozenset({"abd", "pnr", "si", "spg", "sqa", "ui"})
 
 
 def require_library_key(key: str | None) -> str:
@@ -122,6 +128,28 @@ def resolve_video_file(root: Path, name: str) -> Path:
     return candidate
 
 
+@lru_cache(maxsize=len(SPOT_BENCH_TASKS))
+def _read_annotations(path: str, _mtime_ns: int) -> Any:
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def load_clip_annotation(root: Path, key: str, name: str) -> dict[str, Any] | None:
+    """One clip's benchmark annotation, or None when the library has none for it."""
+    kind = name.split("_", 1)[0]
+    if key != "spot-bench" or kind not in SPOT_BENCH_TASKS:
+        return None
+    path = root / f"{kind}.renamed.json"
+    try:
+        entries = _read_annotations(str(path), path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Annotations could not be read") from exc
+    entry = entries.get(name) if isinstance(entries, dict) else None
+    return {"kind": kind, "annotation": entry} if isinstance(entry, dict) else None
+
+
 def mount_video_routes(
     app: FastAPI, roots: Mapping[str, Path], thumbnails: ThumbnailCache
 ) -> None:
@@ -172,6 +200,19 @@ def mount_video_routes(
             metadata.thumbnail, media_type="image/jpeg", headers=headers
         )
 
+    @app.get("/v1/videos/{name}/annotations")
+    def get_video_annotations(
+        name: str,
+        key: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        library_key = require_library_key(key)
+        root = require_library_root(roots, library_key)
+        resolve_video_file(root, name)
+        found = load_clip_annotation(root, library_key, name)
+        if found is None:
+            raise HTTPException(status_code=404, detail="No annotations for this video")
+        return found
+
     @app.get("/v1/videos/{name}")
     def get_video(
         name: str,
@@ -193,6 +234,7 @@ __all__ = [
     "VIDEO_ROOT_ENV_VARS",
     "is_safe_video_name",
     "list_library_videos",
+    "load_clip_annotation",
     "mount_video_routes",
     "require_library_key",
     "require_library_root",

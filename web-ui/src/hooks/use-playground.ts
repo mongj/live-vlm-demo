@@ -32,6 +32,7 @@ import { FrameRates, type FrameRateSnapshot } from "@/lib/frame-rates";
 import { readPreference, writePreference, type CaptionSize } from "@/lib/playground-preferences";
 import { predictionsFilename, SessionEvidence, sessionLogFilename, sanitizeEvidenceSnapshot, safeFailureReason, overloadRecoveryMessage, type EvidenceEvent, type EvidenceReason, type SessionLogSummary, type TranscriptEndReason, type TranscriptInterruptionSource } from "@/lib/session-evidence";
 import { generationConfigErrors, generationEvidence } from "@/lib/generation-config";
+import { annotationProcedure, fetchClipAnnotation, type ClipAnnotation } from "@/lib/clip-annotations.mjs";
 import { defaultProcedure, parseSteps, procedureErrors as validateProcedure, procedureSessionConfig, readStoredProcedure, writeStoredProcedure, type ProcedureConfig } from "@/lib/procedure.mjs";
 import { cleanRunExport, createSessionRun, predictionsFromRun, TRACKER_SETTINGS, turnBreakdown } from "@/lib/session-run.mjs";
 import { SessionLogArchive, type SessionLogArchiveState } from "@/lib/session-log-archive";
@@ -68,7 +69,7 @@ export type TranscriptMessage = {
   endReason?: TranscriptEndReason;
   interruptionSource?: TranscriptInterruptionSource;
   /** Sent on the user's behalf; a check-in repeats on a schedule. */
-  origin?: "request" | "check_in";
+  origin?: "request" | "check_in" | "step_list";
   /** Typed by a human operator in Wizard of Oz mode, not produced by a model. */
   operator?: boolean;
   /** This reply named the step the tracker now estimates as current. */
@@ -87,6 +88,12 @@ export type DebugRawEntry = {
   /** Logged send timestamp for this turn, Unix milliseconds. */
   t: number;
 };
+
+export type ClipAnnotationState =
+  | {status:"loading"; clipKey:string}
+  | {status:"none"; clipKey:string}
+  | {status:"error"; clipKey:string; message:string}
+  | {status:"ready"; clipKey:string; annotation:ClipAnnotation; filled:boolean};
 
 export type PlaygroundState = {
   catalogStatus: "loading" | "ready" | "error";
@@ -152,6 +159,8 @@ export type PlaygroundState = {
   procedure: ProcedureConfig;
   /** The model gets no sound from this library clip: none selected, or the clip has no audio track. */
   silentLibraryVideo: boolean;
+  /** Benchmark annotations of the selected SPOT-Bench clip. */
+  clipAnnotation: ClipAnnotationState | null;
   procedureErrors: Record<string,string>;
   setProcedure: (patch: Partial<ProcedureConfig>) => void;
   /** Live or most recent session; null before the first session. */
@@ -267,6 +276,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [procedure, setProcedureState] = useState<ProcedureConfig>(defaultProcedure);
   const procedureRef = useRef(procedure);
   procedureRef.current = procedure;
+  const [clipAnnotationState, setClipAnnotationState] = useState<ClipAnnotationState|null>(null);
+  const annotationClipRef = useRef<string|null>(null);
+  /** What the last annotations filled in, so a later clip can tell them from typed text. */
+  const annotationFilledRef = useRef<{task:string;stepsText:string}|null>(null);
   const [predictionDownloadStatus, setPredictionDownloadStatus] = useState("");
   const [operatorVoice, setOperatorVoiceState] = useState(true);
   const operatorVoiceRef = useRef(createOperatorVoice());
@@ -479,6 +492,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [captionSize, setCaptionSizeState] = useState<CaptionSize>("compact");
   const [captionBackgroundOpacity, setCaptionBackgroundOpacityState] = useState(0.5);
   const [phase, setPhase] = useState<SessionPhase>("idle");
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionStartedAtMonotonicMs, setSessionStartedAtMonotonicMs] = useState<number | null>(null);
   const [recoverableError, setRecoverableError] = useState<string | null>(null);
@@ -522,7 +537,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   function setProcedure(patch:Partial<ProcedureConfig>) {
     // Prompt, steps and schedule are fixed at session start so one log has one configuration.
     const liveEditable=Object.keys(patch).every(key=>key === "showOnlyNewSteps" || key === "speakOnlyNewSteps");
-    if (phase !== "idle" && !liveEditable) return;
+    if (phaseRef.current !== "idle" && !liveEditable) return;
     const next={...procedureRef.current,...patch};
     procedureRef.current=next;
     setProcedureState(next);
@@ -1298,6 +1313,12 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
             if (replyIsCurrent) captionTimelineRef.current.schedule(message.caption_unit,interval,performance.now());
           }
         }
+        if (replyStep?.listSays.length) {
+          // Supplied text, not the model's: kept apart from reply text, captions and predictions.
+          for (const row of replyStep.listSays) recordEvidence("step_list_say",{toStep:row.step+1,clipS:row.clipS});
+          setMessages(current=>[...current,...replyStep.listSays.map(row=>({id:crypto.randomUUID(),role:"assistant" as const,origin:"step_list" as const,text:row.value,streaming:false}))]);
+          operatorVoiceRef.current.speak(replyStep.listSays.map(row=>row.value).join(" "));
+        }
         const stepFields={...(replyStep?.announcedStep === null || replyStep?.announcedStep === undefined ? {} : {announced:true,trackerStep:replyStep.announcedStep}),
           ...(run?.wizard ? {operator:true} : {})};
         if (run?.wizard && replyIsCurrent && presentable) {
@@ -1642,7 +1663,37 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     void element.play().catch(() => undefined);
   }
 
+  function procedureHoldsAnnotations() {
+    const filled=annotationFilledRef.current;
+    return filled !== null && filled.task === procedureRef.current.task && filled.stepsText === procedureRef.current.stepsText;
+  }
+
+  /** Reselecting the same clip keeps any edits. Annotated steps never outlive their clip. */
+  async function loadClipAnnotation(video: VideoRecord) {
+    const clipKey=video.origin ? `${video.origin.sourceId}:${video.origin.name}` : `local:${video.id}`;
+    if (annotationClipRef.current === clipKey) return;
+    annotationClipRef.current=clipKey;
+    if (phaseRef.current === "idle" && procedureHoldsAnnotations()) setProcedure({task:"",stepsText:""});
+    annotationFilledRef.current=null;
+    if (video.origin?.sourceId !== "spot-bench") { setClipAnnotationState(null); return; }
+    setClipAnnotationState({status:"loading",clipKey});
+    try {
+      const annotation=await fetchClipAnnotation(video.origin.sourceId,video.origin.name);
+      if (annotationClipRef.current !== clipKey) return;
+      if (!annotation) { setClipAnnotationState({status:"none",clipKey}); return; }
+      const patch=phaseRef.current === "idle" ? annotationProcedure(annotation) : null;
+      if (patch) { setProcedure(patch); annotationFilledRef.current=patch; }
+      setClipAnnotationState({status:"ready",clipKey,annotation,filled:patch !== null});
+    } catch (error) {
+      if (annotationClipRef.current !== clipKey) return;
+      // Picked again, it can try once more. The video itself is unaffected.
+      annotationClipRef.current=null;
+      setClipAnnotationState({status:"error",clipKey,message:error instanceof Error ? error.message : "Annotations could not be read"});
+    }
+  }
+
   async function selectVideo(video: VideoRecord) {
+    void loadClipAnnotation(video);
     invalidateSourceSession();
     const requestId = fileRequestIdRef.current + 1;
     fileRequestIdRef.current = requestId;
@@ -1799,7 +1850,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     const run=createSessionRun({
       procedure:built ? {task:procedureNow.task.trim(),steps:parseSteps(procedureNow.stepsText),instruction:procedureNow.instruction.trim(),prompt:built.prompt,
         responsePolicy:built.policySupported ? "none" : "not_supported",checkIns:{enabled:procedureNow.checkIns,intervalS:procedureNow.checkInInterval,text:procedureNow.checkInText.trim()},
-        tracker:procedureNow.tracker,showOnlyNewSteps:procedureNow.showOnlyNewSteps,speakOnlyNewSteps:procedureNow.speakOnlyNewSteps} : null,
+        tracker:procedureNow.tracker,showOnlyNewSteps:procedureNow.showOnlyNewSteps,speakOnlyNewSteps:procedureNow.speakOnlyNewSteps,sayNextStep:procedureNow.sayNextStep,stepsFrom:procedureHoldsAnnotations() ? "annotations" : "typed"} : null,
       videoId:fileSource ? activeVideo?.origin?.name ?? activeVideo?.name ?? null : null,
       startedAtMs:Date.now(),
       wizard:model.id === WIZARD_MODEL_ID,
@@ -1809,7 +1860,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     evidenceRef.current?.attachRun(()=>cleanRunExport(run.exportForLog()));
     recordEvidence("procedure_config",{procedureEnabled:!!built,...(run.procedure ? {stepCount:run.procedure.steps.length,instructionChars:run.procedure.instruction.length,
       responsePolicy:run.procedure.responsePolicy,checkInsEnabled:run.procedure.checkIns.enabled,checkInIntervalS:run.procedure.checkIns.intervalS,
-      trackerEnabled:run.procedure.tracker,showOnlyNewSteps:run.procedure.showOnlyNewSteps,speakOnlyNewSteps:run.procedure.speakOnlyNewSteps,videoHeld:fileSource,
+      trackerEnabled:run.procedure.tracker,showOnlyNewSteps:run.procedure.showOnlyNewSteps,speakOnlyNewSteps:run.procedure.speakOnlyNewSteps,sayNextStep:run.procedure.sayNextStep === true,videoHeld:fileSource,
       ...(run.procedure.tracker ? TRACKER_SETTINGS : {})} : {})});
     if (built && !built.promptSupported && !run.wizard) setSessionNotice("This model takes no system prompt, so the task and steps were not sent.");
     if (run.procedure) {
@@ -2264,6 +2315,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     runtimeDiagnostics,
     procedure,
     silentLibraryVideo: videoSource === "file" && !(audio.videoAudioSelected && videoAudioStream),
+    clipAnnotation: activeVideo?.origin && clipAnnotationState?.clipKey === `${activeVideo.origin.sourceId}:${activeVideo.origin.name}` ? clipAnnotationState : null,
     procedureErrors,
     setProcedure,
     runView,

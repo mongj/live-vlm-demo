@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import type { PlaygroundState } from "@/hooks/use-playground";
+import type { ClipAnnotationState, PlaygroundState } from "@/hooks/use-playground";
 import {
   buildProcedurePrompt,
   DEFAULT_CHECK_IN_TEXT,
@@ -47,8 +47,37 @@ function SwitchRow({
   );
 }
 
+function ClipAnnotations({ state, procedureOn }: { state: ClipAnnotationState; procedureOn: boolean }) {
+  if (state.status === "loading") return <p className="text-xs text-muted-foreground">Loading this clip&apos;s annotations.</p>;
+  if (state.status === "none") return <p className="text-xs text-muted-foreground">This clip has no annotations.</p>;
+  if (state.status === "error") return <p className="text-xs wrap-break-word text-destructive">{state.message}</p>;
+  const { annotation, filled } = state;
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5 rounded-md border p-2.5 text-xs" data-slot="clip-annotations">
+      <p className="font-medium wrap-break-word">SPOT-Bench annotations: {annotation.label}</p>
+      {annotation.task ? <p className="wrap-break-word text-muted-foreground">Task: {annotation.task}</p> : null}
+      {annotation.actions.length ? <p className="wrap-break-word text-muted-foreground">Actions: {annotation.actions.join(", ")}</p> : null}
+      {filled ? <p className="wrap-break-word text-muted-foreground">Task and steps were filled in from these, as the benchmark&apos;s reference answers.{procedureOn ? "" : " Turn on procedure mode to use them."}</p> : null}
+      <details className="min-w-0">
+        <summary className="cursor-pointer text-muted-foreground">Reference answers and times</summary>
+        <p className="mt-1.5 text-muted-foreground">For checking only. The times are never sent to the model.</p>
+        <ul className="mt-1.5 flex max-h-48 flex-col gap-1.5 overflow-y-auto">
+          {annotation.turns.map((turn, index) => (
+            <li className="min-w-0 wrap-break-word" key={index}>
+              {turn.question ? <p>{turn.askS === null ? "" : `At ${turn.askS} s: `}{turn.question}</p> : null}
+              {turn.responses.length
+                ? turn.responses.map((response, at) => <p className="text-muted-foreground" key={at}>{turn.responseTimes[at] === undefined ? "" : `${turn.responseTimes[at]} s: `}{response}</p>)
+                : <p className="text-muted-foreground">Expected at {turn.responseTimes.map(time => `${time} s`).join(", ")}</p>}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
 export function ProcedureSection({ playground, idPrefix = "procedure" }: { playground: PlaygroundState; idPrefix?: string }) {
-  const { procedure, procedureErrors: errors, setProcedure, sessionActive, silentLibraryVideo } = playground;
+  const { procedure, procedureErrors: errors, setProcedure, sessionActive, silentLibraryVideo, clipAnnotation } = playground;
   const steps = parseSteps(procedure.stepsText);
   const locked = sessionActive;
   const id = (name: string) => `${idPrefix}-${name}`;
@@ -57,7 +86,7 @@ export function ProcedureSection({ playground, idPrefix = "procedure" }: { playg
   return (
     <ConfigSection
       defaultOpen={false}
-      subtitle={!procedure.enabled ? "Off" : invalid ? "On · needs attention" : `On · ${steps.length} ${steps.length === 1 ? "step" : "steps"}`}
+      subtitle={!procedure.enabled ? (clipAnnotation?.status === "ready" ? "Off · annotations loaded" : "Off") : invalid ? "On · needs attention" : `On · ${steps.length} ${steps.length === 1 ? "step" : "steps"}`}
       title="Procedure Mode"
     >
       <div className="flex min-w-0 flex-col gap-4 overflow-x-hidden px-4.5 pt-3.5 pb-4.5">
@@ -69,6 +98,7 @@ export function ProcedureSection({ playground, idPrefix = "procedure" }: { playg
           label="Use procedure mode"
           onChange={enabled => setProcedure({enabled})}
         />
+        {clipAnnotation ? <ClipAnnotations procedureOn={procedure.enabled} state={clipAnnotation} /> : null}
         {procedure.enabled ? (
           <>
             <div className="flex min-w-0 flex-col gap-1.5">
@@ -187,6 +217,14 @@ export function ProcedureSection({ playground, idPrefix = "procedure" }: { playg
                   id={id("speak-only")}
                   label="Speak only new steps"
                   onChange={speakOnlyNewSteps => setProcedure({speakOnlyNewSteps})}
+                />
+                <SwitchRow
+                  checked={procedure.sayNextStep}
+                  description="When the step estimate moves, the browser voice reads the next step from your list. It is labelled as step text and never counted as the model's words."
+                  disabled={locked}
+                  id={id("say-next")}
+                  label="Also say the next listed step"
+                  onChange={sayNextStep => setProcedure({sayNextStep})}
                 />
               </div>
             ) : null}

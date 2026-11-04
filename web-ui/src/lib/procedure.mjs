@@ -1,4 +1,4 @@
-/** @typedef {{enabled:boolean,task:string,stepsText:string,instruction:string,checkIns:boolean,checkInInterval:number,checkInText:string,tracker:boolean,showOnlyNewSteps:boolean,speakOnlyNewSteps:boolean}} ProcedureConfig */
+/** @typedef {{enabled:boolean,task:string,stepsText:string,instruction:string,checkIns:boolean,checkInInterval:number,checkInText:string,tracker:boolean,showOnlyNewSteps:boolean,speakOnlyNewSteps:boolean,sayNextStep:boolean}} ProcedureConfig */
 
 export const DEFAULT_STANDING_INSTRUCTION = "Keep watching me. Every time what I am doing changes, quickly tell me what I am doing and the next step. Do not wait to be asked.";
 export const DEFAULT_CHECK_IN_TEXT = "What is the next step? Give one short instruction.";
@@ -14,7 +14,7 @@ const MAX_TYPED_CHARS = 500;
 export function defaultProcedure() {
   return {enabled:false, task:"", stepsText:"", instruction:DEFAULT_STANDING_INSTRUCTION,
     checkIns:false, checkInInterval:DEFAULT_CHECK_IN_INTERVAL, checkInText:DEFAULT_CHECK_IN_TEXT,
-    tracker:true, showOnlyNewSteps:false, speakOnlyNewSteps:false};
+    tracker:true, showOnlyNewSteps:false, speakOnlyNewSteps:false, sayNextStep:false};
 }
 
 /** One step per line; pasted numbering and bullets are not part of the step.
@@ -98,6 +98,7 @@ export function sanitizeProcedure(value) {
     tracker:flag(base.tracker, raw.tracker),
     showOnlyNewSteps:flag(base.showOnlyNewSteps, raw.showOnlyNewSteps),
     speakOnlyNewSteps:flag(base.speakOnlyNewSteps, raw.speakOnlyNewSteps),
+    sayNextStep:flag(base.sayNextStep, raw.sayNextStep),
   };
 }
 

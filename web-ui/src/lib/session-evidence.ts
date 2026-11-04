@@ -1,6 +1,6 @@
 import { cleanRunExport, type RunExport } from "@/lib/session-run.mjs";
 
-export type EvidenceEvent = "start" | "client_config" | "generation_config" | "procedure_config" | "playback_hold" | "check_in" | "tracker_transition" | "turn_latency" | "step_gate" | "operator_reply" | "socket_open" | "session_accepted" | "session_ended" | "input" | "input_status" | "output" | "response_boundary" | "diagnostic" | "playback" | "caption_timeline" | "interrupt" | "issue" | "state_change" | "failure" | "stop";
+export type EvidenceEvent = "start" | "client_config" | "generation_config" | "procedure_config" | "step_list_say" | "playback_hold" | "check_in" | "tracker_transition" | "turn_latency" | "step_gate" | "operator_reply" | "socket_open" | "session_accepted" | "session_ended" | "input" | "input_status" | "output" | "response_boundary" | "diagnostic" | "playback" | "caption_timeline" | "interrupt" | "issue" | "state_change" | "failure" | "stop";
 export type EvidenceReason = "input_overload" | "startup_failed" | "socket_error" | "socket_closed" | "gateway_error" | "input_failed" | "typed_timeout" | "send_failed" | "stop_failed" | "malformed_message" | "stopped" | "unmounted" | "replaced";
 export type SessionLogSummary = {eventCount:number; issueCount:number; stateChangeCount:number; terminal:boolean; downloadStatus:string; transcriptEnabled:boolean};
 type RunProvider = () => RunExport|null;
@@ -12,7 +12,7 @@ type TranscriptTiming = {
   gapSincePreviousMessageUpdateSeconds:number|null;
   gapStatus:"first_message"|"available"|"overlap"|"unavailable";
 };
-type TranscriptRow = {role:"user"|"assistant";source?:"voice"|"typed";origin?:"request"|"check_in";text:string;at:number;updatedAt:number;partial:boolean;endReason?:TranscriptEndReason;interruptionSource?:TranscriptInterruptionSource;timing?:TranscriptTiming|null};
+type TranscriptRow = {role:"user"|"assistant";source?:"voice"|"typed";origin?:"request"|"check_in"|"step_list";text:string;at:number;updatedAt:number;partial:boolean;endReason?:TranscriptEndReason;interruptionSource?:TranscriptInterruptionSource;timing?:TranscriptTiming|null};
 const transcriptEndReasons=new Set<unknown>(["model_final","interrupted","session_ended"]);
 const interruptionSources=new Set<unknown>(["microphone","typed","server","input-transcription"]);
 type SavedTranscript = {entries:TranscriptRow[];truncated:boolean};
@@ -51,7 +51,7 @@ function cleanTranscript(value:unknown,start:number,end:number):SavedTranscript 
     const updatedAt=typeof row.updatedAt === "number" && Number.isFinite(row.updatedAt) ? Math.min(end,Math.max(at,row.updatedAt)) : at;
     const timingKnown=row.timing !== null && validTranscriptTime(row.at) && validTranscriptTime(row.updatedAt) && row.at >= start && row.updatedAt >= row.at && row.updatedAt <= end;
     const endReason=row.role === "assistant" && transcriptEndReasons.has(row.endReason) ? row.endReason as TranscriptEndReason : undefined;
-    entries.push({role:row.role,...(["voice","typed"].includes(row.source) ? {source:row.source} : {}),...(["request","check_in"].includes(row.origin) ? {origin:row.origin} : {}),text,at,updatedAt,partial:row.partial === true,
+    entries.push({role:row.role,...(["voice","typed"].includes(row.source) ? {source:row.source} : {}),...(["request","check_in","step_list"].includes(row.origin) ? {origin:row.origin} : {}),text,at,updatedAt,partial:row.partial === true,
       ...(timingKnown ? {} : {timing:null}),
       ...(endReason ? {endReason} : {}),...(endReason === "interrupted" && interruptionSources.has(row.interruptionSource) ? {interruptionSource:row.interruptionSource as TranscriptInterruptionSource} : {})});
     bytes+=new TextEncoder().encode(text).byteLength;
@@ -70,7 +70,7 @@ export function predictionsFilename(videoId:string, startedAt:number, filter:"al
   return `predictions-${wizard ? "OPERATOR-not-model-" : ""}${stem}-${filter === "announced" ? "new-steps" : "all-replies"}-${stamp}_SGT.json`;
 }
 const reasons = new Set<EvidenceReason>(["input_overload","startup_failed","socket_error","socket_closed","gateway_error","input_failed","typed_timeout","send_failed","stop_failed","malformed_message","stopped","unmounted","replaced"]);
-const events = new Set<EvidenceEvent>(["start","client_config","generation_config","procedure_config","playback_hold","check_in","tracker_transition","turn_latency","step_gate","operator_reply","socket_open","session_accepted","session_ended","input","input_status","output","response_boundary","diagnostic","playback","caption_timeline","interrupt","issue","state_change","failure","stop"]);
+const events = new Set<EvidenceEvent>(["start","client_config","generation_config","procedure_config","step_list_say","playback_hold","check_in","tracker_transition","turn_latency","step_gate","operator_reply","socket_open","session_accepted","session_ended","input","input_status","output","response_boundary","diagnostic","playback","caption_timeline","interrupt","issue","state_change","failure","stop"]);
 const strings: Record<string,Set<string>> = {
   source:new Set(["microphone","mixed_audio","typed","video","voice","server","input-transcription"]),
   state:new Set(["transcribing","preparing","sending","sent","waiting","failed","cancelled","connecting","queued","connected","listening","responding","error","closed","startup","admission","session_ready","input_sent","model_output","input_drop","asr_complete","asr_failed","tts_complete","tts_failed","speech_onset","speech_end","scheduled","stopped"]),
@@ -95,7 +95,7 @@ const numeric = new Set(["bytes","textChars","sequence","generation","turnOrder"
   "stepCount","instructionChars","checkInIntervalS","trackerMu","trackerShape","trackerHit","trackerNear","trackerTau","trackerMapTau","checkInIndex","dueClipS","queuedClipS","sentClipS","holdMs","fromStep","toStep","mappedStep","belief","turnIndex","prepareMs","deliveryMs","firstTextMs","firstAudioMs","replyMs","replyChars","sentences","computeMs","inputAgeMs","withheldChars","withheldAudioBytes","releasedItems","speak_units","listen_units","overruns","last_compute_ms","max_compute_ms"]);
 // Replies before a held video starts have no clip time, and those after can seek back.
 const signedNumbers=new Set(["clipS","decidedClipS"]);
-const booleans = new Set(["procedureEnabled","checkInsEnabled","trackerEnabled","showOnlyNewSteps","speakOnlyNewSteps","videoHeld","stepMatched","final","interrupted","discarded","transcription","typed_input","hasFrame","hasText","accepted","last_force_listen","instructionAccepted","native_matched","native_force_listen","whitespaceOnly"]);
+const booleans = new Set(["procedureEnabled","checkInsEnabled","trackerEnabled","showOnlyNewSteps","speakOnlyNewSteps","sayNextStep","videoHeld","stepMatched","final","interrupted","discarded","transcription","typed_input","hasFrame","hasText","accepted","last_force_listen","instructionAccepted","native_matched","native_force_listen","whitespaceOnly"]);
 const nativeNumbers=new Set(["native_input_sequence","native_input_age_ms","native_input_frames","native_input_audio_ms","native_listen_events","native_listen_streak","native_since_content_ms"]);
 const captionCounters=new Set(["caption_unit","captionPage","captionOrder","leadingWhitespace","trailingWhitespace"]);
 const markerNumbers=new Set(["markerIndex","frameSequence","latestFrameSequence","latestFrameAt","latestFrameElapsedMs","frameAgeMs"]);

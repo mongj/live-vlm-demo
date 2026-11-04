@@ -162,6 +162,18 @@ function ProcedureSummary({ run }: { run: SessionRunView }) {
         <>
           <p>Step estimate: {run.currentStep >= 0 ? `${run.currentStep + 1} of ${run.steps.length}` : "None yet"} · {run.transitions.length} moves{lastMove ? ` · last belief ${(lastMove.belief * 100).toFixed(0)}%` : ""}</p>
           <p>At a new step: {run.announcedCount} of {run.sentenceCount} sentences</p>
+          {run.stepList.enabled ? (
+            <div data-slot="step-list-says">
+              <p>Said from your step list, not the model: {run.stepList.said.length}</p>
+              {run.stepList.said.length ? (
+                <ul className="mt-0.5 space-y-0.5">
+                  {run.stepList.said.map(row => (
+                    <li className="break-words" key={row.step}>{row.clipS === null ? "" : `${row.clipS.toFixed(1)} s · `}Step {row.step + 1}: {row.value}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
           <p>Withheld by the new-step filter: {(run.withheld.audioMs / 1000).toFixed(1)} s of {(spokenMs / 1000).toFixed(1)} s speech · {run.withheld.replies} replies</p>
         </>
       ) : <p>Step tracker off</p>}

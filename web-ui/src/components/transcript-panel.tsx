@@ -238,7 +238,7 @@ export function TranscriptPanel({
   const debugLabel = debugOpen ? "Hide debug panel" : "Show debug panel";
   const inputPolicy = typedInputPolicy(modelId, sessionActive, speechCapabilities, typedBusy);
   const [draft, setDraft] = useState('');
-  const visibleMessages = showOnlyNewSteps ? messages.filter(message => message.role !== "assistant" || message.announced) : messages;
+  const visibleMessages = showOnlyNewSteps ? messages.filter(message => message.role !== "assistant" || message.announced || message.origin === "step_list") : messages;
   const hiddenReplies = messages.length - visibleMessages.length;
 
   async function handleSubmit(message: PromptInputMessage) {
@@ -314,6 +314,9 @@ export function TranscriptPanel({
             visibleMessages.map((message) => (
               <Message from={message.role} key={message.id}>
                 <MessageContent>
+                  {message.origin === "step_list" ? (
+                    <p className="mb-1 text-[10px] font-medium text-muted-foreground">From your step list, not the model</p>
+                  ) : null}
                   {(message.operator && !hideOperatorLabel) || message.trackerStep !== undefined ? (
                     <p className="mb-1 text-[10px] font-medium text-muted-foreground">
                       {[message.operator && !hideOperatorLabel ? "Operator, not a model" : "", message.trackerStep !== undefined ? `New step ${message.trackerStep + 1}` : ""].filter(Boolean).join(" · ")}

@@ -9,6 +9,9 @@ const STOP = new Set(("a an and are as at be but by for from has have i in into 
 /** Frozen settings from the development videos; do not retune on test clips. */
 export const TRACKER_PARAMS = Object.freeze({mu:25, shape:1.0, hit:0.7, near:0.15, tau:0.4, mapTau:0.34});
 
+/** Settings for saying listed steps, chosen on the same videos for that rule. */
+export const LEAD_PARAMS = Object.freeze({mu:45, shape:1.0, hit:0.7, near:0.15, tau:0.5, mapTau:0.34});
+
 /** @param {string} text @returns {Set<string>} */
 export function contentWords(text) {
   const out = new Set();

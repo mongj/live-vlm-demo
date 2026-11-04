@@ -1,6 +1,6 @@
-import { createSentenceSplitter, createStepTracker, TRACKER_PARAMS } from "./step-tracker.mjs";
+import { createSentenceSplitter, createStepTracker, LEAD_PARAMS, TRACKER_PARAMS } from "./step-tracker.mjs";
 
-/** @typedef {{task:string,steps:string[],instruction:string,prompt:string,responsePolicy:string,checkIns:{enabled:boolean,intervalS:number,text:string},tracker:boolean,showOnlyNewSteps:boolean,speakOnlyNewSteps:boolean}} RunProcedure */
+/** @typedef {{task:string,steps:string[],instruction:string,prompt:string,responsePolicy:string,checkIns:{enabled:boolean,intervalS:number,text:string},tracker:boolean,showOnlyNewSteps:boolean,speakOnlyNewSteps:boolean,sayNextStep?:boolean,stepsFrom?:string}} RunProcedure */
 /** @typedef {'request'|'check_in'|'typed'|'voice'|'proactive'} TurnKind */
 /** @typedef {{index:number,kind:TurnKind,inputId?:string,queuedAtMs?:number,sendingAtMs?:number,sentAtMs?:number,firstTextAtMs?:number,firstAudioAtMs?:number,endAtMs?:number,replyChars:number,sentences:number,computeMs?:number,inputAgeMs?:number,status:string}} TurnRow */
 /** @typedef {{text:string,audio:string|null,unit:number|undefined}} GateItem */
@@ -50,6 +50,13 @@ export const TRACKER_SETTINGS = Object.freeze({trackerMu:TRACKER_PARAMS.mu, trac
  */
 export function createSessionRun({procedure = null, videoId = null, startedAtMs, wizard = false}) {
   const tracker = procedure?.tracker && procedure.steps.length ? createStepTracker(procedure.steps) : null;
+  const leadTracker = tracker && procedure?.sayNextStep ? createStepTracker(procedure.steps, LEAD_PARAMS) : null;
+  /** Supplied step text said by the app. Never the model's words, so never in `sentences` or predictions.
+   * @type {{step:number,value:string,clipS:number|null,wallMs:number}[]}
+   */
+  const stepListSays = [];
+  /** @type {Set<number>} */
+  const saidSteps = new Set();
   const splitter = createSentenceSplitter();
   /** @type {{clipS:number|null,wallMs:number,value:string,announced:boolean,step:number|null,decidedClipS?:number|null}[]} */
   const sentences = [];
@@ -161,12 +168,28 @@ export function createSessionRun({procedure = null, videoId = null, startedAtMs,
     }
   }
 
+  /** On entering a step, say it if not yet said, then the next one. The same as filter_lead with d=0.
+   * @param {ReturnType<ReturnType<typeof createStepTracker>["observeStep"]>|null} result
+   * @param {{clipS:number|null,wallMs:number}} at @param {{listSays?:typeof stepListSays}} sink
+   */
+  function sayListedSteps(result, at, sink) {
+    if (!result?.moved || !procedure || !sink.listSays) return;
+    for (const step of [result.current, result.current + 1]) {
+      if (step >= procedure.steps.length || saidSteps.has(step)) continue;
+      saidSteps.add(step);
+      const row = {step, value:procedure.steps[step].slice(0, MAX_SENTENCE_CHARS), clipS:at.clipS, wallMs:at.wallMs};
+      stepListSays.push(row);
+      sink.listSays.push(row);
+    }
+  }
+
   /** @param {{value:string,stamp:{clipS:number|null,wallMs:number}}} sentence @param {{clipS:number|null,wallMs:number}} at
-   * @param {boolean} delivered @param {{moved:object[],announcedStep:number|null}} sink
+   * @param {boolean} delivered @param {{moved:object[],announcedStep:number|null,listSays?:typeof stepListSays}} sink
    */
   function finishSentence(sentence, at, delivered, sink) {
     const {value, stamp} = sentence;
     if (tracker) applyDecision(tracker.endSentence(at.clipS ?? 0), stamp, at, delivered, sink);
+    if (leadTracker) sayListedSteps(leadTracker.endSentence(at.clipS ?? 0), at, sink);
     const named = sentenceNamed;
     sentenceNamed = null;
     const row = {clipS:stamp.clipS, wallMs:stamp.wallMs, value:value.slice(0, MAX_SENTENCE_CHARS), announced:named !== null, step:named ? named.step : null,
@@ -290,15 +313,19 @@ export function createSessionRun({procedure = null, videoId = null, startedAtMs,
       const delivered = !(interrupted && replyWithheld());
       const done = splitter.push(text, stamp);
       if (final || interrupted) done.push(...splitter.flush(stamp));
-      /** @type {{moved:any[],announcedStep:number|null}} */
-      const sink = {moved:[], announcedStep:null};
+      /** @type {{moved:any[],announcedStep:number|null,listSays:typeof stepListSays}} */
+      const sink = {moved:[], announcedStep:null, listSays:[]};
       for (const sentence of done) {
         if (tracker) applyDecision(tracker.observeKnown(clipS ?? 0, sentence.value), sentence.stamp, stamp, delivered, sink);
+        if (leadTracker) sayListedSteps(leadTracker.observeKnown(clipS ?? 0, sentence.value), stamp, sink);
         finishSentence(sentence, stamp, delivered, sink);
       }
       // Words of the next sentence that are already known can decide now.
       if (tracker) {
-        for (const sentence of splitter.peek()) applyDecision(tracker.observeKnown(clipS ?? 0, sentence.value), sentence.stamp, stamp, delivered, sink);
+        for (const sentence of splitter.peek()) {
+          applyDecision(tracker.observeKnown(clipS ?? 0, sentence.value), sentence.stamp, stamp, delivered, sink);
+          if (leadTracker) sayListedSteps(leadTracker.observeKnown(clipS ?? 0, sentence.value), stamp, sink);
+        }
       }
 
       const holdText = showOnly && !!tracker;
@@ -352,7 +379,7 @@ export function createSessionRun({procedure = null, videoId = null, startedAtMs,
           openReply = null;
         }
       }
-      return {text:passText, audio:passAudio, release, dropped, transitions:sink.moved, announcedStep:sink.announcedStep, sentences:done.length};
+      return {text:passText, audio:passAudio, release, dropped, transitions:sink.moved, announcedStep:sink.announcedStep, sentences:done.length, listSays:sink.listSays};
     },
 
     /** Local playback interruption: later text from this reply is discarded.
@@ -448,6 +475,7 @@ export function createSessionRun({procedure = null, videoId = null, startedAtMs,
         clipS,
         showOnlyNewSteps:showOnly,
         speakOnlyNewSteps:speakOnly,
+        stepList:{enabled:!!leadTracker, said:stepListSays.map(row => ({...row}))},
         withheld:{replies:withheld.replies, chars:withheld.chars, audioMs:withheld.audioBytes / AUDIO_BYTES_PER_MS, spokenMs:withheld.spokenBytes / AUDIO_BYTES_PER_MS},
         checkIns:{enabled:!!procedure?.checkIns.enabled, intervalS:procedure?.checkIns.intervalS ?? 0, sent:checkInCount("sent"),
           queued:checkInCount("queued"), failed:checkInCount("failed"), skipped:checkInCount("skipped"), lastReason:checkIns.findLast(row => row.reason)?.reason ?? null,
@@ -466,9 +494,11 @@ export function createSessionRun({procedure = null, videoId = null, startedAtMs,
         wizardOfOz:wizard,
         videoId, playbackStartedAtMs, droppedSentences,
         trackerParams:tracker ? {...TRACKER_PARAMS} : null,
+        stepListParams:leadTracker ? {...LEAD_PARAMS} : null,
+        stepListSays:stepListSays.map(row => ({...row})),
         procedure:procedure ? {task:procedure.task, steps:[...procedure.steps], instruction:procedure.instruction, prompt:procedure.prompt,
           responsePolicy:procedure.responsePolicy, checkIns:{...procedure.checkIns}, tracker:procedure.tracker,
-          showOnlyNewSteps:showOnly, speakOnlyNewSteps:speakOnly} : null,
+          showOnlyNewSteps:showOnly, speakOnlyNewSteps:speakOnly, sayNextStep:!!leadTracker, stepsFrom:procedure.stepsFrom ?? "typed"} : null,
         sentences:[...sentences.map(row => ({...row})), ...unfinished],
         transitions:transitions.map(row => ({...row})),
         checkIns:checkIns.map(row => ({...row})),
@@ -498,11 +528,16 @@ export function cleanRunExport(value) {
     playbackStartedAtMs:finite(value.playbackStartedAtMs) ? value.playbackStartedAtMs : null,
     droppedSentences:finite(value.droppedSentences) ? value.droppedSentences : 0,
     trackerParams:record(value.trackerParams) ? Object.fromEntries(Object.entries(value.trackerParams).filter(([, v]) => finite(v))) : null,
+    stepListParams:record(value.stepListParams) ? Object.fromEntries(Object.entries(value.stepListParams).filter(([, v]) => finite(v))) : null,
+    stepListSays:list(value.stepListSays, MAX_SENTENCES).flatMap(row => finite(row.step) && typeof row.value === "string" && finite(row.wallMs) ? [{
+      step:row.step, value:row.value.slice(0, MAX_SENTENCE_CHARS), clipS:finite(row.clipS) ? row.clipS : null, wallMs:row.wallMs,
+    }] : []),
     procedure:record(p) ? {
       task:str(p.task, 1000), steps:Array.isArray(p.steps) ? p.steps.slice(0, 64).filter(s => typeof s === "string").map(s => s.slice(0, 1000)) : [],
       instruction:str(p.instruction, 2000), prompt:str(p.prompt, 64_000), responsePolicy:str(p.responsePolicy, 32),
       checkIns:record(p.checkIns) ? {enabled:p.checkIns.enabled === true, intervalS:finite(p.checkIns.intervalS) ? p.checkIns.intervalS : 0, text:str(p.checkIns.text, 2000)} : null,
-      tracker:p.tracker === true, showOnlyNewSteps:p.showOnlyNewSteps === true, speakOnlyNewSteps:p.speakOnlyNewSteps === true,
+      tracker:p.tracker === true, showOnlyNewSteps:p.showOnlyNewSteps === true, speakOnlyNewSteps:p.speakOnlyNewSteps === true, sayNextStep:p.sayNextStep === true,
+      stepsFrom:p.stepsFrom === "annotations" ? "annotations" : "typed",
     } : null,
     sentences:list(value.sentences, MAX_SENTENCES).flatMap(row => typeof row.value === "string" && finite(row.wallMs) ? [{
       clipS:finite(row.clipS) ? row.clipS : null, wallMs:row.wallMs, value:row.value.slice(0, MAX_SENTENCE_CHARS),
