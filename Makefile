@@ -14,6 +14,10 @@ help:
 		'  client             Build and start production frontend in screen live-vlm-client (port 3001)' \
 		'  down               Stop gateway and frontend' \
 		'  joyai              Submit PBS job and print manual tunnel commands' \
+		'  joyai-modal        Deploy JoyAI to Modal (1 GPU, JOYAI_MODAL_GPU=H100|H200|B200|B300) and wait until warm' \
+		'  joyai-modal-stop   Stop the JoyAI Modal app and its container (make joyai-modal redeploys)' \
+		'  joyai-modal-bench  Benchmark JoyAI on Modal GPUs in parallel (JOYAI_MODAL_BENCH_GPUS=H100,B200)' \
+		'  minicpm-modal-bench Benchmark MiniCPM on Modal in parallel (MINICPM_MODAL_BENCH_CONFIGS=H100,H100:awq)' \
 		'  minicpm-prepare    Prepare an owned offline MiniCPM runtime (no install or GPU)' \
 		'  minicpm-configure  Save a prepared runtime and compute node for this account/checkout' \
 		'  minicpm            Submit one provisioned, reviewed MiniCPM PBS runtime (45 minutes)' \
@@ -148,6 +152,34 @@ joyai:
 	echo "  qdel $$job"; \
 	echo "Watch startup: tail -n 50 -F $(CURDIR)/joyai/logs/joyai_web.run.log $(CURDIR)/joyai/logs/webinfer.log"
 
+JOYAI_MODAL_APP := live-vlm-joyai
+JOYAI_MODAL_GPU ?= H100
+JOYAI_MODAL_BENCH_GPUS ?= H100,H200,B200,B300
+MINICPM_MODAL_BENCH_CONFIGS ?= H100,H200,B200,B300,H100:awq,H100:compile
+
+.PHONY: joyai-modal joyai-modal-stop joyai-modal-bench minicpm-modal-bench
+joyai-modal:
+	@command -v modal >/dev/null && command -v python3 >/dev/null || { \
+		echo "need an authenticated modal CLI and python3 on PATH" >&2; \
+		exit 1; \
+	}
+	@old=$$(python3 "$(CURDIR)/scripts/joyai_modal_up.py" --list-containers) || exit 1; \
+	JOYAI_MODAL_GPU="$(JOYAI_MODAL_GPU)" modal deploy "$(CURDIR)/scripts/joyai_modal.py" || exit 1; \
+	JOYAI_MODAL_GPU="$(JOYAI_MODAL_GPU)" python3 "$(CURDIR)/scripts/joyai_modal_up.py" $$old
+
+joyai-modal-stop:
+	@# Stopping only the container does not help: the autoscaler replaces it until
+	@# the scaledown window passes. `make joyai-modal` redeploys the app.
+	@out=$$(modal app stop --yes $(JOYAI_MODAL_APP) 2>&1); status=$$?; echo "$$out"; \
+	case "$$out" in *"already stopped"*) exit 0 ;; esac; exit $$status
+
+joyai-modal-bench:
+	@command -v modal >/dev/null || { echo "need an authenticated modal CLI on PATH" >&2; exit 1; }
+	modal run "$(CURDIR)/scripts/joyai_modal_bench.py" --gpus "$(JOYAI_MODAL_BENCH_GPUS)"
+
+minicpm-modal-bench:
+	@command -v modal >/dev/null || { echo "need an authenticated modal CLI on PATH" >&2; exit 1; }
+	modal run "$(CURDIR)/scripts/minicpm_modal_bench.py" --configs "$(MINICPM_MODAL_BENCH_CONFIGS)"
 
 .PHONY: install
 install:

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from .adapters.base import Adapter
 from .adapters.gemini import GeminiAdapter
 from .adapters.joyai import JoyAIAdapter
+from .adapters.joyai_modal import JoyAIModalAdapter
 from .adapters.mock import MockAdapter
 from .adapters.minicpm import MiniCPMAdapter, validate_video_url
 from .adapters.wizard import WizardAdapter
@@ -22,10 +23,12 @@ from .types import ModelSpec, SessionError
 MODEL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_MODEL_ID_LEN = 64
 KNOWN_ROW_KEYS = frozenset({"id", "adapter", "label", "base_url"})
+JOYAI_BASE_URL_ENV = {"joyai": "JOYAI_BASE_URL", "joyai-modal": "JOYAI_MODAL_BASE_URL"}
 
 ADAPTER_REGISTRY: dict[str, type[Adapter[Any]]] = {
     "gemini": GeminiAdapter,
     "joyai": JoyAIAdapter,
+    "joyai-modal": JoyAIModalAdapter,
     "mock": MockAdapter,
     "minicpm": MiniCPMAdapter,
     "wizard": WizardAdapter,
@@ -109,7 +112,7 @@ def _parse_row(row: Mapping[str, Any], seen_ids: set[str]) -> ModelSpec:
         raise CatalogError(f"Unknown adapter: {adapter}")
     raw_base_url = row.get("base_url")
     base_url: str | None
-    if adapter == "joyai":
+    if adapter in JOYAI_BASE_URL_ENV:
         if not isinstance(raw_base_url, str) or not raw_base_url:
             raise CatalogError("JoyAI models require base_url")
         base_url = normalize_joyai_base_url(raw_base_url)
@@ -129,9 +132,10 @@ def _apply_joyai_base_url_override(
     spec: ModelSpec,
     environ: Mapping[str, str],
 ) -> ModelSpec:
-    if spec.adapter != "joyai":
+    env_name = JOYAI_BASE_URL_ENV.get(spec.adapter)
+    if env_name is None:
         return spec
-    override = environ.get("JOYAI_BASE_URL", "").strip()
+    override = environ.get(env_name, "").strip()
     if not override:
         return spec
     parsed = urlparse(override)

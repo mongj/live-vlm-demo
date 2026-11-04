@@ -10,7 +10,7 @@ test("live MiniCPM video never enables a typed message that upstream would ignor
 });
 
 test("existing models retain typed input only during a live session", () => {
-  for (const model of ["joyai-vl", "gemini-3-8-live", "mock"]) {
+  for (const model of ["joyai-vl", "joyai-vl-modal", "gemini-3-8-live", "mock"]) {
     assert.equal(typedInputPolicy(model, true).enabled, true);
     assert.equal(typedInputPolicy(model, false).enabled, false);
     assert.equal(typedInputPolicy(model, true).notice, null);

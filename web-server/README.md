@@ -34,7 +34,9 @@ Defaults:
 | `LIVE_VLM_THUMBNAIL_CACHE` | `$XDG_CACHE_HOME/live-vlm/thumbnails` (else `~/.cache/live-vlm/thumbnails`) | Directory for generated video thumbnails and durations |
 | `LIVE_VLM_THUMBNAIL_CONCURRENCY` | `4` | Maximum ffmpeg thumbnail jobs at once |
 | `GEMINI_API_KEY` | unset | Required to start a Gemini Live Session. Loaded from the process environment or `web-server/.env`. |
-| `JOYAI_BASE_URL` | unset | Optional override of every JoyAI row's `base_url` in the catalog. Accepts `http(s)://host:port` or `.../v1`. |
+| `JOYAI_BASE_URL` | unset | Optional override of every `joyai` row's `base_url` in the catalog. Accepts `http(s)://host:port` or `.../v1`. |
+| `JOYAI_MODAL_BASE_URL` | unset | The same override for `joyai-modal` rows (JoyAI on Modal). |
+| `JOYAI_MODAL_TOKEN_ID`, `JOYAI_MODAL_TOKEN_SECRET` | unset | Modal proxy token required to start a JoyAI (Modal) Session. `make joyai-modal` writes them to `web-server/.env`. |
 
 ```bash
 LIVE_VLM_PORT=9001 python -m live_vlm_server

@@ -108,6 +108,7 @@ def parse_joyai_reply(payload: object) -> Reply:
 
 class JoyAIAdapter(Adapter[JoyAIConfig]):
     config_model: ClassVar[type[BaseModel]] = JoyAIConfig
+    unavailable_message: ClassVar[str] = "JoyAI is unavailable (HTTP 503)"
 
     def __init__(
         self,
@@ -140,6 +141,9 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         self._asr_pending: tuple[SegmentUpdate, int, int, int] | None = None
         self._asr_task: asyncio.Task[None] | None = None
 
+    def _client_kwargs(self) -> dict[str, Any]:
+        return {"base_url": self.spec.base_url}
+
     def _session_headers(self) -> dict[str, str]:
         return {
             SESSION_HEADER: self.session_id,
@@ -150,7 +154,7 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
         if self.spec.base_url is None:
             raise SessionError("JoyAI base_url is missing", fatal=True)
         self.session_id = make_session_id(self.spec.id)
-        client_kwargs: dict[str, Any] = {"base_url": self.spec.base_url}
+        client_kwargs = self._client_kwargs()
         if self._http_transport is not None:
             client_kwargs["transport"] = self._http_transport
         self._http = httpx.AsyncClient(**client_kwargs)
@@ -164,6 +168,8 @@ class JoyAIAdapter(Adapter[JoyAIConfig]):
             raise SessionError(f"JoyAI open failed: {exc}", fatal=True) from exc
         if response.status_code == 404:
             raise SessionError("JoyAI session binding failed", fatal=True)
+        if response.status_code == 503:
+            raise SessionError(self.unavailable_message, fatal=True)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

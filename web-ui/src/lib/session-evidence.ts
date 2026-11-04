@@ -141,7 +141,7 @@ export class SessionEvidence {
   private savedRun:RunExport|null=null;
 
   constructor(model:string, at=Date.now(), tick=performance.now(), limits={maxEvents:20_000,maxBytes:10*1024*1024}, readonly transcriptEnabled=false) {
-    this.model = ["joyai-vl","minicpm-o-4-5","gemini-3-8-live","mock","wizard-of-oz"].includes(model) ? model : "other";
+    this.model = ["joyai-vl","joyai-vl-modal","minicpm-o-4-5","gemini-3-8-live","mock","wizard-of-oz"].includes(model) ? model : "other";
     this.startedAt=at; this.startTick=tick;
     this.maxEvents=Math.min(20_000,Math.max(1,limits.maxEvents));
     this.maxBytes=Math.min(10*1024*1024,Math.max(512,limits.maxBytes));

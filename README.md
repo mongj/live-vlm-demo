@@ -103,6 +103,43 @@ tail -n 50 -F joyai/logs/joyai_web.run.log joyai/logs/webinfer.log
 catalog keeps `base_url = "http://127.0.0.1:8070/v1"`. The Mac still forwards only
 the frontend port.
 
+### JoyAI on Modal
+
+When the cluster lacks free GPUs, select **JoyAI (Modal)** instead. It runs the
+same webinfer stack (main model, summary model, and adapter) on one Modal GPU.
+Deploy and warm it from a machine with an authenticated `modal` CLI:
+
+```bash
+make joyai-modal
+```
+
+This deploys `scripts/joyai_modal.py` as the `live-vlm-joyai` app, creates a
+Modal proxy token on first run and saves it to `web-server/.env`
+(`JOYAI_MODAL_TOKEN_ID`, `JOYAI_MODAL_TOKEN_SECRET`), then waits until the
+Server answers. The first boot downloads weights into a Modal Volume and can
+take up to ~30 minutes; later cold starts take a few minutes. The GPU defaults
+to an H100; pick another with `make joyai-modal JOYAI_MODAL_GPU=H200` (or `B200`,
+`B300`). Each run redeploys the one app, so the gateway URL stays the same and
+the previous GPU's container is replaced. Restart the
+gateway after the token is first saved. For a gateway on another host (e.g.
+`caquelon`), copy those two lines into that checkout's `web-server/.env`.
+
+The container scales to zero after 20 idle minutes; a Start while it is cold
+fails with a "starting" message and wakes it. `make joyai-modal-stop` stops the
+app and its container now (Modal would otherwise replace a stopped container
+until the idle window passes); run `make joyai-modal` to deploy it again.
+The Server URL is the
+`joyai-vl-modal` row's `base_url` in `web-server/config.toml`
+(override with `JOYAI_MODAL_BASE_URL`).
+
+To compare GPUs, run `make joyai-modal-bench` (choose GPUs with
+`JOYAI_MODAL_BENCH_GPUS=H100,B200`). It starts a separate, temporary app with one
+container per GPU in parallel. Each container boots the same stack, discards a
+warm-up session, then replays three fixed 30-turn sessions against the adapter
+over localhost, so network latency is excluded. It prints per-GPU medians and
+writes every turn (latency, tokens, adapter timing, full response), the boot
+phase timings, and vLLM metrics snapshots to `logs/joyai-modal-bench/<UTC time>/`.
+
 ### MiniCPM on a PBS compute node
 
 Run from an account-owned checkout on `caquelon`. Each account needs a prepared

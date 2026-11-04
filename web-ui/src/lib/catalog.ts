@@ -9,8 +9,9 @@ export type CatalogModel = {
 
 const MODEL_DISPLAY_ORDER = new Map([
   ["joyai-vl", 0],
-  ["minicpm-o-4-5", 1],
-  ["gemini-3-8-live", 2],
+  ["joyai-vl-modal", 1],
+  ["minicpm-o-4-5", 2],
+  ["gemini-3-8-live", 3],
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {

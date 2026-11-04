@@ -20,7 +20,7 @@ import {
   mediaDeviceErrorMessage,
   stopMediaStream,
 } from "@/lib/media-devices";
-import { typedInputPolicy } from "@/lib/model-input-policy.mjs";
+import { isJoyAIModel, typedInputPolicy } from "@/lib/model-input-policy.mjs";
 import { emptyInputFeedback, reduceInputFeedback, type InputFeedback, type InputCaption } from "@/lib/input-feedback.mjs";
 import { updateGuidance, type GuidanceState } from "@/lib/assistant-guidance.mjs";
 import { decodePcmBase64, encodePcmBase64, PcmPlayer } from "@/lib/pcm";
@@ -2096,7 +2096,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       setRecoverableError(inputPolicy.notice ?? "Start a Session before sending a message");
       return false;
     }
-    const nativeJoyInput = selectedModelIdRef.current === 'joyai-vl' && speechRef.current?.typed_input === true;
+    const nativeJoyInput = isJoyAIModel(selectedModelIdRef.current) && speechRef.current?.typed_input === true;
     const standInTyped = (selectedModelIdRef.current === 'mock' || selectedModelIdRef.current === WIZARD_MODEL_ID) && speechRef.current?.typed_input === true;
     if (selectedModelIdRef.current === 'minicpm-o-4-5' || nativeJoyInput || standInTyped) {
       if (nativeJoyInput && !sourceLiveRef.current) {

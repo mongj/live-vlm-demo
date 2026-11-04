@@ -15,7 +15,13 @@ SHIPPED = Path(__file__).resolve().parents[1] / "config.toml"
 
 def test_shipped_catalog_contains_joyai_gemini_minicpm_and_mock() -> None:
     catalog = load_catalog(SHIPPED, environ={})
-    assert [spec.id for spec in catalog.specs] == ["joyai-vl", "gemini-3-8-live", "minicpm-o-4-5", "mock"]
+    assert [spec.id for spec in catalog.specs] == [
+        "joyai-vl", "joyai-vl-modal", "gemini-3-8-live", "minicpm-o-4-5", "mock"
+    ]
+    joyai_modal = catalog.get("joyai-vl-modal")
+    assert joyai_modal is not None and joyai_modal.adapter == "joyai-modal"
+    assert joyai_modal.base_url is not None and joyai_modal.base_url.startswith("https://")
+    assert catalog.entry(joyai_modal)["config_schema"] == JoyAIConfig.model_json_schema()
     joyai = catalog.get("joyai-vl")
     gemini = catalog.get("gemini-3-8-live")
     mock = catalog.get("mock")
@@ -173,6 +179,37 @@ base_url = "http://127.0.0.1:8070/v1"
     original = unchanged.get("joyai-vl")
     assert original is not None
     assert original.base_url == "http://127.0.0.1:8070/v1"
+
+
+def test_joyai_modal_base_url_override_is_separate(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[[models]]
+id = "joyai-vl"
+adapter = "joyai"
+label = "JoyAI"
+base_url = "http://127.0.0.1:8070/v1"
+
+[[models]]
+id = "joyai-vl-modal"
+adapter = "joyai-modal"
+label = "JoyAI (Modal)"
+base_url = "https://old.modal.run/v1"
+""",
+        encoding="utf-8",
+    )
+    catalog = load_catalog(
+        config,
+        environ={
+            "JOYAI_BASE_URL": "http://host.docker.internal:8070",
+            "JOYAI_MODAL_BASE_URL": "https://new.modal.run",
+        },
+    )
+    cluster = catalog.get("joyai-vl")
+    modal = catalog.get("joyai-vl-modal")
+    assert cluster is not None and cluster.base_url == "http://host.docker.internal:8070/v1"
+    assert modal is not None and modal.base_url == "https://new.modal.run/v1"
 
 
 def test_minicpm_catalog_requires_video_websocket_endpoint(tmp_path: Path) -> None:

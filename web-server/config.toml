@@ -5,6 +5,12 @@ label = "JoyAI-VL-Interaction"
 base_url = "http://127.0.0.1:8070/v1"
 
 [[models]]
+id = "joyai-vl-modal"
+adapter = "joyai-modal"
+label = "JoyAI (Modal)"
+base_url = "https://evan-zhangmingjun--live-vlm-joyai-joyai.us-east.modal.direct/v1"
+
+[[models]]
 id = "gemini-3-8-live"
 adapter = "gemini"
 label = "Gemini 3.8 Live"

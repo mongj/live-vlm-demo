@@ -1,6 +1,9 @@
 .DS_Store
 *.log
 joyai/logs/
+logs/joyai-modal-bench/
+logs/minicpm-modal-bench/
+logs/joyai-cluster-bench/
 __pycache__/
 .conda/
 .venv/
