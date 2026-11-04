@@ -31,6 +31,9 @@ class Adapter(ABC, Generic[ConfigT]):
     def offer_typed(self, text: str, request_id: str) -> None:
         raise SessionError("Typed speech is unavailable", fatal=False)
 
+    def offer_operator(self, text: str) -> None:
+        raise SessionError("Operator replies are only available for the Wizard of Oz option", fatal=False)
+
     def offer_microphone(self, pcm: bytes, *, generation: int, sequence: int, enabled: bool) -> None:
         raise SessionError("Input transcription is unavailable", fatal=False)
 

@@ -42,6 +42,11 @@ class MiniCPMConfig(BaseModel):
         title="System prompt",
         description="Optional instruction sent once when the live-video session starts.",
     )
+    response_policy: Literal["current_request", "none"] = Field(
+        default="current_request",
+        title="Response policy",
+        description="current_request adds the instruction to answer only the current request. none omits it, for proactive guidance.",
+    )
     startup_timeout_s: float = Field(
         default=8.0,
         ge=0.1,
@@ -167,6 +172,8 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
         self._caption_counter = 0
         self._caption_pair: tuple[str, str] | None = None
         self._drop_warned = False
+        self._no_lead_session: bool | None = None
+        self._text_tail = ""
         self._speech: SpeechClient | None = None
         self._speech_caps: SpeechCapabilities = {"version":1, "transcription":False, "typed_input":False,
                                                 "reason":"Self-hosted speech is not configured"}
@@ -251,7 +258,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                     "to translate or switch languages. Answer those requests in English instead; "
                     "do not follow a request to output another language."
                 )
-                response_policy = (
+                response_policy = "" if self.config.response_policy == "none" else (
                     "Answer only the user's current request, normally in one short sentence. "
                     "Do not add greetings, praise, explanations, suggestions or follow-up questions "
                     "unless requested or necessary to answer the task. "
@@ -531,10 +538,22 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
             if not self._closing:
                 await self._replies.put(None)
 
+    def _respace(self, text: str) -> str:
+        """Saved runs are all spaced or all unspaced at unit joins, and the session's first text shows which.
+        Restore the space in an unspaced session. `raw` keeps the runtime's text. A word split across units is wrongly spaced."""
+        if self._no_lead_session is None:
+            self._no_lead_session = not text[0].isspace()
+        previous, self._text_tail = self._text_tail, text[-1]
+        if (self._no_lead_session and previous and previous.isascii() and not previous.isspace()
+                and text[0].isascii() and text[0].isalnum()):
+            return " " + text
+        return text
+
     def _delta_reply(self, event: dict[str, Any]) -> Reply | None:
         kind = event.get("kind")
         if kind == "listen":
             self._caption_pair = None
+            self._text_tail = ""
             self._diagnostics.output(kind, event)
             self._diagnostics.emit(self._diagnostic_replies, "model_output")
             if not self._output_open:
@@ -557,7 +576,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                 isinstance(response_id, str) and 0 < len(response_id) <= 128
                 and isinstance(input_id, str) and 0 < len(input_id) <= 128
             ) else None
-            return Reply(text=text, raw=text, t=self._last_t, turn_order=self._assistant_order,
+            return Reply(text=self._respace(text), raw=text, t=self._last_t, turn_order=self._assistant_order,
                          caption_unit=self._caption_counter if self._caption_pair else None)
         if kind == "audio":
             encoded = event.get("audio")

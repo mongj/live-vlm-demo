@@ -19,6 +19,7 @@ from .protocol import (
     InputAppendMessage,
     InputTypedMessage,
     InputMicrophoneMessage,
+    InputOperatorMessage,
     SessionEndMessage,
     SessionStartMessage,
     parse_inbound,
@@ -60,7 +61,10 @@ class Session:
     feed_ready: asyncio.Event
     end_requested: bool = False
 
-    def ingest(self, feed: InputAppendMessage | InputTypedMessage | InputMicrophoneMessage) -> None:
+    def ingest(self, feed: InputAppendMessage | InputTypedMessage | InputMicrophoneMessage | InputOperatorMessage) -> None:
+        if isinstance(feed, InputOperatorMessage):
+            self.adapter.offer_operator(feed.text)
+            return
         if isinstance(feed, InputTypedMessage):
             self.adapter.offer_typed(feed.text, feed.request_id)
             return

@@ -19,3 +19,8 @@ base_url = "ws://127.0.0.1:18006/v1/realtime?mode=video"
 id = "mock"
 adapter = "mock"
 label = "Mock"
+
+[[models]]
+id = "wizard-of-oz"
+adapter = "wizard"
+label = "Wizard of Oz"

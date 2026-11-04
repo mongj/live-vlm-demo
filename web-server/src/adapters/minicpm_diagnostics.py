@@ -16,6 +16,8 @@ EVENTS = frozenset({"startup", "admission", "session_ready", "input_sent", "mode
 STAGES = frozenset({"connecting", "queued", "connected", "listening", "responding", "error", "closed"})
 METRICS = frozenset({"prefill_ms", "generate_ms", "wall_clock_ms", "cost_llm_ms", "kv_cache_length",
                      "n_tokens", "n_tts_tokens", "vision_slices", "vision_tokens"})
+# One input packet is sent per second, so a unit taking longer falls behind.
+UNIT_BUDGET_MS = 1000.0
 
 
 def _number(value: Any) -> bool:
@@ -40,6 +42,9 @@ class MiniCPMDiagnostics:
         self._listen_streak = 0
         self._last_content_at: float | None = None
         self._last_emit = -math.inf
+        self.units: dict[str, int | float] = {"speak": 0, "listen": 0, "overruns": 0}
+        self._speak_input: str | None = None
+        self._compute_key: tuple[Any, Any] | None = None
 
     def register_input(self, *, audio_bytes: int, frames: int, force_source: str) -> str:
         """Bounded metadata keyed by the protocol's echoed input_id; no media.
@@ -88,6 +93,15 @@ class MiniCPMDiagnostics:
             self._listen_streak = 0
             self._last_content_at = now
         input_id = event.get("input_id")
+        # Text and audio from one packet are one spoken unit; count it once.
+        if kind == "listen":
+            self.units["listen"] += 1
+        elif isinstance(input_id, str):
+            if input_id != self._speak_input:
+                self.units["speak"] += 1
+                self._speak_input = input_id
+        elif kind == "text":
+            self.units["speak"] += 1
         matched = self._inputs.get(input_id) if isinstance(input_id, str) else None
         self._native = {"kind": kind, "matched": matched is not None,
                         "listen_events": self._listen_events, "listen_streak": self._listen_streak}
@@ -105,6 +119,20 @@ class MiniCPMDiagnostics:
             self.metrics = {key: value for key, value in reported.items() if key in METRICS and _number(value)}
         index = event.get("chunk_index")
         if _number(index): self.chunk_index = index
+        if isinstance(reported, dict): self._record_compute(index, input_id)
+
+    def _record_compute(self, index: Any, input_id: Any) -> None:
+        # Reported model time for one unit; excludes transport and queueing.
+        compute = self.metrics.get("wall_clock_ms")
+        if compute is None and "prefill_ms" in self.metrics and "generate_ms" in self.metrics:
+            compute = self.metrics["prefill_ms"] + self.metrics["generate_ms"]
+        key = (index, input_id)
+        if compute is None or key == self._compute_key:
+            return
+        self._compute_key = key
+        self.units["last_compute_ms"] = compute
+        self.units["max_compute_ms"] = max(self.units.get("max_compute_ms", 0), compute)
+        if compute > UNIT_BUDGET_MS: self.units["overruns"] += 1
 
     def helper(self, kind: str, started: float) -> None:
         self.speech[f"{kind}_ms"] = max(0.0, (time.monotonic() - started) * 1000)
@@ -116,6 +144,7 @@ class MiniCPMDiagnostics:
         result: dict[str, Any] = {
             "version": 1, "event": event, "elapsed_ms": max(0.0, (time.monotonic() - self.started) * 1000),
             "stage": self.stage, "input": dict(self.input), "output": dict(self.output_counts), "speech": dict(self.speech),
+            "units": dict(self.units),
         }
         if self.metrics: result["metrics"] = dict(self.metrics)
         if self.chunk_index is not None: result["chunk_index"] = self.chunk_index

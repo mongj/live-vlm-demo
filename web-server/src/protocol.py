@@ -88,6 +88,20 @@ class InputTypedMessage(BaseModel):
         return text
 
 
+class InputOperatorMessage(BaseModel):
+    """A human operator's reply for the Wizard of Oz option. Every other adapter refuses it."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    type: Literal["input.operator"]
+    text: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("text")
+    @classmethod
+    def nonempty(cls, text: str) -> str:
+        if not text.strip() or any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+            raise ValueError("Invalid text")
+        return text
+
+
 class InputMicrophoneMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     type: Literal["input.microphone"]
@@ -117,18 +131,18 @@ class ErrorMessage(BaseModel):
 
 
 InboundMessage = Annotated[
-    Union[SessionStartMessage, SessionEndMessage, InputAppendMessage, InputTypedMessage, InputMicrophoneMessage],
+    Union[SessionStartMessage, SessionEndMessage, InputAppendMessage, InputTypedMessage, InputMicrophoneMessage, InputOperatorMessage],
     Field(discriminator="type"),
 ]
 
 _INBOUND_ADAPTER: TypeAdapter[
-    SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage
+    SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage | InputOperatorMessage
 ] = TypeAdapter(InboundMessage)
 
 
 def parse_inbound(
     raw: str,
-) -> SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage:
+) -> SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage | InputOperatorMessage:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:

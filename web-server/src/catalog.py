@@ -16,6 +16,7 @@ from .adapters.gemini import GeminiAdapter
 from .adapters.joyai import JoyAIAdapter
 from .adapters.mock import MockAdapter
 from .adapters.minicpm import MiniCPMAdapter, validate_video_url
+from .adapters.wizard import WizardAdapter
 from .types import ModelSpec, SessionError
 
 MODEL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -27,6 +28,7 @@ ADAPTER_REGISTRY: dict[str, type[Adapter[Any]]] = {
     "joyai": JoyAIAdapter,
     "mock": MockAdapter,
     "minicpm": MiniCPMAdapter,
+    "wizard": WizardAdapter,
 }
 
 
