@@ -1,4 +1,4 @@
-/** @typedef {{id:string, role:'user', source:'voice'|'typed', text:string, streaming:boolean, revision:number, turnOrder:number, status:string, statusDetail?:string}} InputEntry */
+/** @typedef {{id:string, role:'user', source:'voice'|'typed', text:string, streaming:boolean, revision:number, turnOrder:number, status:string, statusDetail?:string, origin?:'request'|'check_in'}} InputEntry */
 /** @typedef {{text:string, label:string, streaming:boolean, turnOrder:number, inputId:string}} InputCaption */
 /** @typedef {{sessionId:string|null, generation:number, latestOrder:number, acceptedInputOrder?:number, pendingId:string|null, busy:boolean, caption:InputCaption|null, entries:InputEntry[], status:string, statusSource:'voice'|'typed'|null}} InputFeedback */
 
@@ -12,6 +12,17 @@ export const inputStatusLabels = {
   sending:'Sending typed instruction…', sent:'Instruction sent', waiting:'Sent · waiting for a response',
   failed:'Input unavailable', cancelled:'Cancelled',
 };
+
+/** Sent on the user's behalf, so never worded as something the user typed. */
+const originStatusLabels = {
+  request:{preparing:'Preparing request speech…', sending:'Sending request before playback…', sent:'Request sent', waiting:'Request sent · waiting for a response'},
+  check_in:{preparing:'Preparing system check-in…', sending:'Sending system check-in…', sent:'System check-in sent', waiting:'System check-in sent · waiting for a response'},
+};
+/** @param {'request'|'check_in'|undefined} origin @param {string} state */
+function statusLabel(origin, state) {
+  const labels = origin ? /** @type {Record<string,string>} */ (originStatusLabels[origin]) : null;
+  return labels?.[state] ?? /** @type {Record<string,string>} */ (inputStatusLabels)[state];
+}
 
 /** Pure ordering prevents delayed ASR from replacing newer captions.
  * @param {InputFeedback} state
@@ -35,9 +46,12 @@ export function reduceInputFeedback(state, event) {
   }
   if (event.type === 'typed') {
     const status = event.transport === 'text' ? 'sending' : 'preparing';
-    const entry = {id:event.input_id,role:/** @type {'user'} */('user'),source:/** @type {'typed'} */('typed'),text:event.text,streaming:false,revision:0,turnOrder:state.latestOrder+1,status};
-    return {...state,pendingId:entry.id,busy:true,status:inputStatusLabels[status],statusSource:'typed',entries:[...state.entries,entry],
-      caption:{text:entry.text,label:'You · typed',streaming:false,turnOrder:entry.turnOrder,inputId:entry.id}};
+    const entry = {id:event.input_id,role:/** @type {'user'} */('user'),source:/** @type {'typed'} */('typed'),text:event.text,streaming:false,revision:0,turnOrder:state.latestOrder+1,status,
+      ...(event.origin ? {origin:event.origin} : {})};
+    return {...state,pendingId:entry.id,busy:true,status:statusLabel(event.origin,status),statusSource:'typed',entries:[...state.entries,entry],
+      // A check-in repeats on a timer: it stays in the transcript, off the video.
+      caption:event.origin === 'check_in' ? state.caption
+        : {text:entry.text,label:event.origin === 'request' ? 'Procedure request' : 'You · typed',streaming:false,turnOrder:entry.turnOrder,inputId:entry.id}};
   }
   if ((event.type === 'input.transcription' || event.source === 'voice') && event.generation !== state.generation) return state;
   if (event.type === 'input.transcription') {
@@ -70,7 +84,7 @@ export function reduceInputFeedback(state, event) {
     acceptedInputOrder:typedDelivered ? Math.max(state.acceptedInputOrder ?? 0,event.turn_order) : state.acceptedInputOrder ?? 0,
     pendingId:ownPending && terminal ? null : state.pendingId,
     busy:ownPending && terminal ? false : state.busy,
-    status:newest ? event.detail ?? inputStatusLabels[event.state] : state.status,
+    status:newest ? event.detail ?? statusLabel(typedEntry?.origin, event.state) : state.status,
     statusSource:newest ? event.source : state.statusSource,
     caption:state.caption?.inputId === event.input_id ? {...state.caption,turnOrder:event.turn_order} : state.caption,
     entries:state.entries.map(e => e.id === event.input_id ? {...e,status:event.state,statusDetail:event.detail,turnOrder:event.turn_order,

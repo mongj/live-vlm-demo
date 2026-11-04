@@ -67,7 +67,19 @@ type TranscriptPanelProps = {
   inputStatus?: string;
   onToggleDebug: () => void;
   onSend: (text: string) => Promise<boolean>;
+  stepProgress?: ReactNode;
+  operatorPanel?: ReactNode;
+  /** A participant may be watching this window. The session log keeps the label. */
+  hideOperatorLabel?: boolean;
+  /** Hide replies that named no new step. The session log still keeps them. */
+  showOnlyNewSteps?: boolean;
 };
+
+function inputRoleLabel(message: TranscriptMessage): string {
+  if (message.origin === "check_in") return "System check-in · sent by the app";
+  if (message.origin === "request") return "Procedure request · typed";
+  return `You · ${message.source}`;
+}
 
 function headerClass(density: TranscriptDensity): string {
   switch (density) {
@@ -218,10 +230,16 @@ export function TranscriptPanel({
   inputStatus,
   onToggleDebug,
   onSend,
+  stepProgress,
+  operatorPanel,
+  hideOperatorLabel = false,
+  showOnlyNewSteps = false,
 }: TranscriptPanelProps) {
   const debugLabel = debugOpen ? "Hide debug panel" : "Show debug panel";
   const inputPolicy = typedInputPolicy(modelId, sessionActive, speechCapabilities, typedBusy);
   const [draft, setDraft] = useState('');
+  const visibleMessages = showOnlyNewSteps ? messages.filter(message => message.role !== "assistant" || message.announced) : messages;
+  const hiddenReplies = messages.length - visibleMessages.length;
 
   async function handleSubmit(message: PromptInputMessage) {
     const text = message.text;
@@ -234,6 +252,7 @@ export function TranscriptPanel({
 
   const composer = (
     <>
+      {operatorPanel}
       {inputPolicy.notice ? (
         <p className="mb-2 text-xs text-muted-foreground" role="note">{inputPolicy.notice}</p>
       ) : null}
@@ -275,26 +294,33 @@ export function TranscriptPanel({
           <TooltipContent>{debugLabel}</TooltipContent>
         </Tooltip>
       </div>
+      {stepProgress}
       <Conversation className="min-h-0">
         <TranscriptAutoScroll latestUserId={messages.findLast(message => message.role === "user")?.id} sessionActive={sessionActive} />
         <ConversationContent className={conversationContentClass(density)}>
-          {messages.length === 0 ? (
+          {visibleMessages.length === 0 ? (
             <ConversationEmptyState
               className={emptyStateClass(density)}
               description={
                 sessionActive
-                  ? inputPolicy.notice ? "Watching the video feed for a response" : "Speak or send a message"
+                  ? hiddenReplies > 0 ? `${hiddenReplies} ${hiddenReplies === 1 ? "reply" : "replies"} hidden because no new step was named.`
+                  : inputPolicy.notice ? "Watching the video feed for a response" : "Speak or send a message"
                   : "Start a session to see the live transcript."
               }
               icon={emptyStateIcon(density)}
               title="No messages"
             />
           ) : (
-            messages.map((message) => (
+            visibleMessages.map((message) => (
               <Message from={message.role} key={message.id}>
                 <MessageContent>
-                  {message.source ? <div className="text-blue-700 dark:text-blue-200">
-                    <p className="mb-1 text-[10px] font-medium">You · {message.source}</p>
+                  {(message.operator && !hideOperatorLabel) || message.trackerStep !== undefined ? (
+                    <p className="mb-1 text-[10px] font-medium text-muted-foreground">
+                      {[message.operator && !hideOperatorLabel ? "Operator, not a model" : "", message.trackerStep !== undefined ? `New step ${message.trackerStep + 1}` : ""].filter(Boolean).join(" · ")}
+                    </p>
+                  ) : null}
+                  {message.source ? <div className={message.origin === "check_in" ? "text-muted-foreground" : "text-blue-700 dark:text-blue-200"} data-origin={message.origin}>
+                    <p className="mb-1 text-[10px] font-medium">{inputRoleLabel(message)}</p>
                     <p className="whitespace-pre-wrap wrap-anywhere">{message.text || (message.streaming ? '…' : '')}</p>
                     {message.status && message.status in inputStatusLabels ? <p className="mt-1 text-[10px] opacity-80">{message.statusDetail ?? inputStatusLabels[message.status as keyof typeof inputStatusLabels]}</p> : null}
                   </div> : <MessageResponse isAnimating={message.streaming}>
@@ -307,6 +333,9 @@ export function TranscriptPanel({
         </ConversationContent>
         <ConversationScrollButton aria-label="Scroll to latest message" title="Scroll to latest message" />
       </Conversation>
+      {showOnlyNewSteps && hiddenReplies > 0 && visibleMessages.length > 0 ? (
+        <p className="border-t px-3 py-1 text-[10px] text-muted-foreground">{hiddenReplies} {hiddenReplies === 1 ? "reply" : "replies"} hidden because no new step was named. Kept in the session log.</p>
+      ) : null}
       <div className={composerWrapClass(density)}>{composer}</div>
     </aside>
   );

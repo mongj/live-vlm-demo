@@ -12,6 +12,8 @@ type MobilePlaygroundProps = {
   transcript: ReactNode;
   debug: ReactNode;
   debugOpen: boolean;
+  /** Extra dock height for the step line and operator box, so messages stay visible. */
+  dockExtraRem?: number;
 };
 
 export function MobilePlayground({
@@ -20,6 +22,7 @@ export function MobilePlayground({
   transcript,
   debug,
   debugOpen,
+  dockExtraRem = 0,
 }: MobilePlaygroundProps) {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -37,7 +40,10 @@ export function MobilePlayground({
       <Separator />
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{camera}</div>
       <Separator />
-      <div className="flex h-(--playground-mobile-dock-height) min-h-0 shrink-0 flex-col overflow-hidden">
+      <div
+        className="flex min-h-0 shrink-0 flex-col overflow-hidden"
+        style={{height:`min(calc(var(--playground-mobile-dock-height) + ${dockExtraRem}rem), 60svh)`}}
+      >
         {debugOpen ? debug : transcript}
       </div>
     </div>

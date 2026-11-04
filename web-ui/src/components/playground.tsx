@@ -6,11 +6,15 @@ import { MediaControlBar } from "@/components/media-control-bar";
 import { MobilePlayground } from "@/components/mobile-playground";
 import { ModelSidebar } from "@/components/model-sidebar";
 import { TranscriptPanel } from "@/components/transcript-panel";
+import { OperatorPanel } from "@/components/operator-panel";
+import { StepProgress } from "@/components/step-progress";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { DESKTOP_QUERY, useHydrated, useIsDesktop } from "@/hooks/use-media-query";
+import { useOperatorLink } from "@/hooks/use-operator-link";
 import { usePlayground, type PlaygroundState } from "@/hooks/use-playground";
 import { useVideoLibrary } from "@/hooks/use-video-library";
 import type { CatalogModel } from "@/lib/catalog";
+import { parseSteps } from "@/lib/procedure.mjs";
 import { releaseStageLayout } from "@/lib/stage-fullscreen.mjs";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -189,6 +193,22 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
     if (releaseLayoutFrameRef.current !== null) cancelAnimationFrame(releaseLayoutFrameRef.current);
   }, []);
 
+  const live = playground.phase === "live";
+  const runView = playground.runView;
+  const liveProcedure = playground.sessionActive && !!runView?.procedureEnabled;
+  const heldForRequest = liveProcedure && runView.hold && runView.hold.stage !== "not_held" && runView.hold.endedAtMs === undefined ? runView.hold : null;
+  const procedureSteps = liveProcedure ? runView.steps : parseSteps(playground.procedure.stepsText);
+  const operatorLinked = useOperatorLink({
+    enabled:playground.wizardMode,
+    state:{live, task:runView?.task ?? "", steps:playground.procedure.enabled ? procedureSteps : [], currentStep:runView?.currentStep ?? -1,
+      clipS:runView?.clipS ?? null, voice:playground.operatorVoice, messages:playground.messages.slice(-8).map(message => ({role:message.role, text:message.text}))},
+    onSend:playground.sendOperatorReply,
+    onVoice:playground.setOperatorVoice,
+    videoRef:playground.videoRef,
+  });
+  const showStepList = playground.procedure.enabled && procedureSteps.length > 0;
+  const currentStep = live && runView?.trackerEnabled ? runView.currentStep : -1;
+
   const camera = (
     <CameraWorkspace
       activeVideo={playground.activeVideo}
@@ -204,6 +224,9 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       sessionNotice={playground.sessionNotice}
       sessionBadge={playground.sessionStatusBadge}
       sessionStartedAtMonotonicMs={playground.sessionStartedAtMonotonicMs}
+      playbackHold={heldForRequest}
+      onStartHeldPlayback={playground.startHeldPlayback}
+      stepBadge={currentStep >= 0 ? `Step ${currentStep + 1} of ${procedureSteps.length} · estimate` : null}
       controlBar={
         <MediaControlBar
           className={isDesktop ? "px-6 pb-6" : "px-3 pb-3"}
@@ -235,6 +258,20 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       onToggleDebug={() => setDebugOpen((open) => !open)}
       recoverableError={playground.recoverableError}
       sessionActive={playground.phase === "live"}
+      showOnlyNewSteps={liveProcedure && playground.procedure.tracker && playground.procedure.showOnlyNewSteps}
+      stepProgress={showStepList ? <StepProgress compact={!isDesktop} live={liveProcedure} run={runView} steps={procedureSteps} /> : null}
+      hideOperatorLabel={operatorLinked}
+      operatorPanel={playground.wizardMode && !operatorLinked ? (
+        <OperatorPanel
+          compact={!isDesktop}
+          live={live}
+          onOpenWindow={() => window.open("/operator","live-vlm-operator","popup,width=560,height=860") !== null}
+          onSend={playground.sendOperatorReply}
+          onVoiceChange={playground.setOperatorVoice}
+          steps={playground.procedure.enabled ? procedureSteps : []}
+          voice={playground.operatorVoice}
+        />
+      ) : null}
     />
   );
 
@@ -244,6 +281,11 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
       playback={playground.playbackDiagnostics}
       diagnostics={playground.runtimeDiagnostics}
       active={playground.phase === 'live'}
+      modelLabel={playground.selectedModel?.label}
+      run={runView}
+      onDownloadPredictions={playground.downloadPredictions}
+      onDownloadSavedPredictions={playground.downloadSavedPredictions}
+      predictionDownloadStatus={playground.predictionDownloadStatus}
       frameRates={playground.frameRates}
       targetFps={playground.framesPerSecond}
       sessionLogSummary={playground.sessionLogSummary}
@@ -287,6 +329,7 @@ export function Playground({ initialModels, initialCatalogError }: PlaygroundPro
           camera={camera}
           debug={debug}
           debugOpen={debugOpen}
+          dockExtraRem={(showStepList ? 2.5 : 0) + (playground.wizardMode && !operatorLinked ? 7.5 : 0)}
           playground={playground}
           transcript={transcript}
         />

@@ -1,6 +1,9 @@
-export type EvidenceEvent = "start" | "client_config" | "generation_config" | "socket_open" | "session_accepted" | "session_ended" | "input" | "input_status" | "output" | "response_boundary" | "diagnostic" | "playback" | "caption_timeline" | "interrupt" | "issue" | "state_change" | "failure" | "stop";
+import { cleanRunExport, type RunExport } from "@/lib/session-run.mjs";
+
+export type EvidenceEvent = "start" | "client_config" | "generation_config" | "procedure_config" | "playback_hold" | "check_in" | "tracker_transition" | "turn_latency" | "step_gate" | "operator_reply" | "socket_open" | "session_accepted" | "session_ended" | "input" | "input_status" | "output" | "response_boundary" | "diagnostic" | "playback" | "caption_timeline" | "interrupt" | "issue" | "state_change" | "failure" | "stop";
 export type EvidenceReason = "input_overload" | "startup_failed" | "socket_error" | "socket_closed" | "gateway_error" | "input_failed" | "typed_timeout" | "send_failed" | "stop_failed" | "malformed_message" | "stopped" | "unmounted" | "replaced";
 export type SessionLogSummary = {eventCount:number; issueCount:number; stateChangeCount:number; terminal:boolean; downloadStatus:string; transcriptEnabled:boolean};
+type RunProvider = () => RunExport|null;
 export type TranscriptEndReason = "model_final" | "interrupted" | "session_ended";
 export type TranscriptInterruptionSource = "microphone" | "typed" | "server" | "input-transcription";
 type TranscriptTiming = {
@@ -9,7 +12,7 @@ type TranscriptTiming = {
   gapSincePreviousMessageUpdateSeconds:number|null;
   gapStatus:"first_message"|"available"|"overlap"|"unavailable";
 };
-type TranscriptRow = {role:"user"|"assistant";source?:"voice"|"typed";text:string;at:number;updatedAt:number;partial:boolean;endReason?:TranscriptEndReason;interruptionSource?:TranscriptInterruptionSource;timing?:TranscriptTiming|null};
+type TranscriptRow = {role:"user"|"assistant";source?:"voice"|"typed";origin?:"request"|"check_in";text:string;at:number;updatedAt:number;partial:boolean;endReason?:TranscriptEndReason;interruptionSource?:TranscriptInterruptionSource;timing?:TranscriptTiming|null};
 const transcriptEndReasons=new Set<unknown>(["model_final","interrupted","session_ended"]);
 const interruptionSources=new Set<unknown>(["microphone","typed","server","input-transcription"]);
 type SavedTranscript = {entries:TranscriptRow[];truncated:boolean};
@@ -48,7 +51,7 @@ function cleanTranscript(value:unknown,start:number,end:number):SavedTranscript 
     const updatedAt=typeof row.updatedAt === "number" && Number.isFinite(row.updatedAt) ? Math.min(end,Math.max(at,row.updatedAt)) : at;
     const timingKnown=row.timing !== null && validTranscriptTime(row.at) && validTranscriptTime(row.updatedAt) && row.at >= start && row.updatedAt >= row.at && row.updatedAt <= end;
     const endReason=row.role === "assistant" && transcriptEndReasons.has(row.endReason) ? row.endReason as TranscriptEndReason : undefined;
-    entries.push({role:row.role,...(["voice","typed"].includes(row.source) ? {source:row.source} : {}),text,at,updatedAt,partial:row.partial === true,
+    entries.push({role:row.role,...(["voice","typed"].includes(row.source) ? {source:row.source} : {}),...(["request","check_in"].includes(row.origin) ? {origin:row.origin} : {}),text,at,updatedAt,partial:row.partial === true,
       ...(timingKnown ? {} : {timing:null}),
       ...(endReason ? {endReason} : {}),...(endReason === "interrupted" && interruptionSources.has(row.interruptionSource) ? {interruptionSource:row.interruptionSource as TranscriptInterruptionSource} : {})});
     bytes+=new TextEncoder().encode(text).byteLength;
@@ -60,8 +63,14 @@ export function sessionLogFilename(startedAt:number):string {
   const stamp=new Date(startedAt+8*60*60*1000).toISOString().slice(0,-1).replace("T","_").replace(/[:.]/g,"-");
   return `session-diagnostics-${stamp}_SGT.json`;
 }
+/** File name for a SPOT-Bench format predictions export. */
+export function predictionsFilename(videoId:string, startedAt:number, filter:"all"|"announced", wizard=false):string {
+  const stamp=new Date(startedAt+8*60*60*1000).toISOString().slice(0,-1).replace("T","_").replace(/[:.]/g,"-");
+  const stem=videoId.replace(/\.[A-Za-z0-9]+$/,"").replace(/[^A-Za-z0-9_-]/g,"_").slice(0,80);
+  return `predictions-${wizard ? "OPERATOR-not-model-" : ""}${stem}-${filter === "announced" ? "new-steps" : "all-replies"}-${stamp}_SGT.json`;
+}
 const reasons = new Set<EvidenceReason>(["input_overload","startup_failed","socket_error","socket_closed","gateway_error","input_failed","typed_timeout","send_failed","stop_failed","malformed_message","stopped","unmounted","replaced"]);
-const events = new Set<EvidenceEvent>(["start","client_config","generation_config","socket_open","session_accepted","session_ended","input","input_status","output","response_boundary","diagnostic","playback","caption_timeline","interrupt","issue","state_change","failure","stop"]);
+const events = new Set<EvidenceEvent>(["start","client_config","generation_config","procedure_config","playback_hold","check_in","tracker_transition","turn_latency","step_gate","operator_reply","socket_open","session_accepted","session_ended","input","input_status","output","response_boundary","diagnostic","playback","caption_timeline","interrupt","issue","state_change","failure","stop"]);
 const strings: Record<string,Set<string>> = {
   source:new Set(["microphone","mixed_audio","typed","video","voice","server","input-transcription"]),
   state:new Set(["transcribing","preparing","sending","sent","waiting","failed","cancelled","connecting","queued","connected","listening","responding","error","closed","startup","admission","session_ready","input_sent","model_output","input_drop","asr_complete","asr_failed","tts_complete","tts_failed","speech_onset","speech_end","scheduled","stopped"]),
@@ -74,9 +83,19 @@ const strings: Record<string,Set<string>> = {
   markerSource:new Set(["button","keyboard"]),
   native_kind:new Set(["listen","text","audio"]),
   native_force_source:new Set(["none","typed","microphone"]),
+  responsePolicy:new Set(["current_request","none","not_supported"]),
+  holdState:new Set(["started","not_held","preparing","sending","sent","waiting","playing","skipped","failed","cancelled","unavailable"]),
+  checkInState:new Set(["queued","sent","failed","skipped"]),
+  skipReason:new Set(["typed_unavailable","video_paused","user_speaking","input_busy","model_replying","late"]),
+  turnKind:new Set(["request","check_in","typed","voice","proactive"]),
+  turnStatus:new Set(["complete","interrupted","no_reply","failed","cancelled"]),
+  gateDecision:new Set(["dropped","released"]),
 };
-const numeric = new Set(["bytes","textChars","sequence","generation","turnOrder","revision","frames","packets","inputAudioMs","outputAudioMs","dropped_audio_ms","text_chunks","audio_chunks","asr_ms","tts_ms","elapsed_ms","chunk_index","prefill_ms","generate_ms","wall_clock_ms","cost_llm_ms","kv_cache_length","n_tokens","n_tts_tokens","vision_slices","vision_tokens","queuedAudioMs","cancelledAudioMs","audioClockMs","playbackStartMs","playbackEndMs","latestObservedOrder","acceptedInputOrder","pendingInputOrder","lastReplyOrder"]);
-const booleans = new Set(["final","interrupted","discarded","transcription","typed_input","hasFrame","hasText","accepted","last_force_listen","instructionAccepted","native_matched","native_force_listen","whitespaceOnly"]);
+const numeric = new Set(["bytes","textChars","sequence","generation","turnOrder","revision","frames","packets","inputAudioMs","outputAudioMs","dropped_audio_ms","text_chunks","audio_chunks","asr_ms","tts_ms","elapsed_ms","chunk_index","prefill_ms","generate_ms","wall_clock_ms","cost_llm_ms","kv_cache_length","n_tokens","n_tts_tokens","vision_slices","vision_tokens","queuedAudioMs","cancelledAudioMs","audioClockMs","playbackStartMs","playbackEndMs","latestObservedOrder","acceptedInputOrder","pendingInputOrder","lastReplyOrder",
+  "stepCount","instructionChars","checkInIntervalS","trackerMu","trackerShape","trackerHit","trackerNear","trackerTau","trackerMapTau","checkInIndex","dueClipS","queuedClipS","sentClipS","holdMs","fromStep","toStep","mappedStep","belief","turnIndex","prepareMs","deliveryMs","firstTextMs","firstAudioMs","replyMs","replyChars","sentences","computeMs","inputAgeMs","withheldChars","withheldAudioBytes","releasedItems","speak_units","listen_units","overruns","last_compute_ms","max_compute_ms"]);
+// Replies before a held video starts have no clip time, and those after can seek back.
+const signedNumbers=new Set(["clipS","decidedClipS"]);
+const booleans = new Set(["procedureEnabled","checkInsEnabled","trackerEnabled","showOnlyNewSteps","speakOnlyNewSteps","videoHeld","stepMatched","final","interrupted","discarded","transcription","typed_input","hasFrame","hasText","accepted","last_force_listen","instructionAccepted","native_matched","native_force_listen","whitespaceOnly"]);
 const nativeNumbers=new Set(["native_input_sequence","native_input_age_ms","native_input_frames","native_input_audio_ms","native_listen_events","native_listen_streak","native_since_content_ms"]);
 const captionCounters=new Set(["caption_unit","captionPage","captionOrder","leadingWhitespace","trailingWhitespace"]);
 const markerNumbers=new Set(["markerIndex","frameSequence","latestFrameSequence","latestFrameAt","latestFrameElapsedMs","frameAgeMs"]);
@@ -95,7 +114,7 @@ const clientStrings:Record<string,ReadonlySet<string>> = {
   microphoneMode:new Set(["push-to-talk","always-listening"]),
   videoSource:new Set(["none","camera","file"]),
 };
-const clientBooleans=new Set(["microphoneEnabled","videoAudioSelected","captionsEnabled","customPromptPresent"]);
+const clientBooleans=new Set(["microphoneEnabled","videoAudioSelected","captionsEnabled","customPromptPresent","wizardOfOz"]);
 
 /** Bounded metadata only. Never pass raw protocol messages or error strings to exports. */
 export class SessionEvidence {
@@ -118,13 +137,24 @@ export class SessionEvidence {
   private maxBytes:number;
   private transcript:SavedTranscript={entries:[],truncated:false};
   private transcriptTimes=new Map<string,{at:number;updatedAt:number;text:string}>();
+  private runProvider:RunProvider|null=null;
+  private savedRun:RunExport|null=null;
 
   constructor(model:string, at=Date.now(), tick=performance.now(), limits={maxEvents:20_000,maxBytes:10*1024*1024}, readonly transcriptEnabled=false) {
-    this.model = ["joyai-vl","minicpm-o-4-5","gemini-3-8-live","mock"].includes(model) ? model : "other";
+    this.model = ["joyai-vl","minicpm-o-4-5","gemini-3-8-live","mock","wizard-of-oz"].includes(model) ? model : "other";
     this.startedAt=at; this.startTick=tick;
     this.maxEvents=Math.min(20_000,Math.max(1,limits.maxEvents));
     this.maxBytes=Math.min(10*1024*1024,Math.max(512,limits.maxBytes));
   }
+
+  /** Text-bearing run record; kept only when the transcript option is on. */
+  attachRun(provider:RunProvider) { this.runProvider=provider; }
+  private currentRun():RunExport|null {
+    if (!this.transcriptEnabled) return null;
+    if (this.terminalReason) return this.savedRun;
+    return this.runProvider ? this.runProvider() : this.savedRun;
+  }
+  restoreRun(value:unknown) { this.savedRun=this.transcriptEnabled ? cleanRunExport(value) : null; }
 
   captureTranscript(messages:ReadonlyArray<{id:string;role:string;text:string;source?:string;streaming?:boolean;endReason?:TranscriptEndReason;interruptionSource?:TranscriptInterruptionSource}>,at=Date.now()) {
     if (!this.transcriptEnabled || this.terminalReason) return;
@@ -174,6 +204,7 @@ export class SessionEvidence {
       else if (captionCounters.has(key) && typeof value === "number" && Number.isSafeInteger(value) && value >= 0) row[key]=value;
       else if ((markerNumbers.has(key) || nativeNumbers.has(key)) && typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER) row[key]=value;
       else if (key === "forced_listen_packets" && typeof value === "number" && Number.isSafeInteger(value) && value >= 0) row[key]=value;
+      else if (signedNumbers.has(key) && typeof value === "number" && Number.isFinite(value)) row[key]=value;
       else if (booleans.has(key) && typeof value === "boolean") row[key]=value;
       else if (typeof value === "string" && strings[key] instanceof Set && strings[key].has(value)) row[key]=value;
       else if (key === "inputId" && typeof value === "string" && value.length <= 128) {
@@ -193,13 +224,14 @@ export class SessionEvidence {
     // older logs must never infer model completion from partial:false.
     this.transcript.entries=this.transcript.entries.map(row=>row.role === "assistant" && !row.endReason ? {...row,endReason:"session_ended"} : row);
     this.add(safe === "stopped" || safe === "unmounted" || safe === "replaced" ? "stop" : "failure",{reason:safe},at,tick);
+    this.savedRun=this.currentRun();
     this.terminalReason=safe;
     this.endedAt=at;
     this.durationMs=Math.max(0,tick-this.startTick);
   }
   setDownloadStatus(status:"Download requested · check browser downloads"|"Download unavailable · retry manually") { this.downloadStatus=status; }
   summary():SessionLogSummary { return {eventCount:this.rows.length,issueCount:this.issues,stateChangeCount:this.changes,terminal:this.terminalReason !== null,downloadStatus:this.downloadStatus,transcriptEnabled:this.transcriptEnabled}; }
-  snapshot() { return {version:1,scope:`Browser-observed diagnostic events; upstream metrics sampled. No media. ${this.transcriptEnabled ? "Opt-in displayed transcript included; ASR may be inaccurate. Transcript partial reports streaming state, not completion; endReason is explicit when known. Timing is first displayed text / last text update; gap is previous retained message's last update to this message's first text, not speech-response latency. Null timing/gap means unknown, unavailable or overlapping as labelled." : "No transcripts."} State-change marks are manual activation times, not exact visual onset or correctness labels. Frame context is the preceding browser submission, not native receipt. Caption events are timeline observations, not proof of rendering or audibility. Not full server/GPU logs.`,model:this.model,startedAt:this.startedAt,endedAt:this.endedAt,durationMs:this.durationMs,terminalReason:this.terminalReason,truncated:this.dropped>0,droppedEvents:this.dropped,issueCount:this.issues,stateChangeCount:this.changes,limits:{maxEvents:this.maxEvents,maxBytes:this.maxBytes},events:this.rows.map(row=>({...row})),transcriptEnabled:this.transcriptEnabled,...(this.transcriptEnabled ? {transcript:withTranscriptTiming(this.transcript,this.startedAt)} : {})}; }
+  snapshot() { return {version:1,scope:`Browser-observed diagnostic events; upstream metrics sampled. No media. ${this.transcriptEnabled ? "Opt-in displayed transcript included; ASR may be inaccurate. Transcript partial reports streaming state, not completion; endReason is explicit when known. Timing is first displayed text / last text update; gap is previous retained message's last update to this message's first text, not speech-response latency. Null timing/gap means unknown, unavailable or overlapping as labelled." : "No transcripts."} State-change marks are manual activation times, not exact visual onset or correctness labels. Frame context is the preceding browser submission, not native receipt. Caption events are timeline observations, not proof of rendering or audibility. Step tracker events are estimates from model replies, not proof a step happened. stepMatched false means elapsed time moved the estimate. Check-in and turn latency rows are browser-observed. If client_config has wizardOfOz true, a human operator typed the assistant replies, so they are not model output. Not full server/GPU logs.`,model:this.model,startedAt:this.startedAt,endedAt:this.endedAt,durationMs:this.durationMs,terminalReason:this.terminalReason,truncated:this.dropped>0,droppedEvents:this.dropped,issueCount:this.issues,stateChangeCount:this.changes,limits:{maxEvents:this.maxEvents,maxBytes:this.maxBytes},events:this.rows.map(row=>({...row})),transcriptEnabled:this.transcriptEnabled,...(this.transcriptEnabled ? {transcript:withTranscriptTiming(this.transcript,this.startedAt),run:this.currentRun()} : {})}; }
 }
 
 export type EvidenceSnapshot = ReturnType<SessionEvidence["snapshot"]>;
@@ -220,6 +252,7 @@ export function sanitizeEvidenceSnapshot(value:unknown, completedOnly=true):Evid
       rebuilt.add(row.event as EvidenceEvent,row,row.at,row.elapsedMs);
     }
   }
+  rebuilt.restoreRun(value.run);
   const clean=rebuilt.snapshot();
   clean.terminalReason=terminal ? value.terminalReason as EvidenceReason : null;
   clean.endedAt=terminal && finiteCount(value.endedAt) ? value.endedAt : null;
@@ -235,8 +268,9 @@ export function sanitizeEvidenceSnapshot(value:unknown, completedOnly=true):Evid
   if (new TextEncoder().encode(JSON.stringify(envelope)).byteLength>maxBytes) {
     clean.scope="Browser events; no media. Caption timeline observations, not rendering/audibility. Transcript partial=streaming, not completion.";
   }
-  while (new TextEncoder().encode(JSON.stringify(clean)).byteLength>maxBytes && (clean.events.length || clean.transcript?.entries.length)) {
-    if (clean.transcript?.entries.length) {clean.transcript.entries.pop();clean.transcript.truncated=true;}
+  while (new TextEncoder().encode(JSON.stringify(clean)).byteLength>maxBytes && (clean.events.length || clean.transcript?.entries.length || clean.run?.sentences.length)) {
+    if (clean.run?.sentences.length) {clean.run.sentences=[];clean.truncated=true;}
+    else if (clean.transcript?.entries.length) {clean.transcript.entries.pop();clean.transcript.truncated=true;}
     else {clean.events.pop();clean.droppedEvents++;clean.truncated=true;}
   }
   return clean;

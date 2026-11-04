@@ -11,7 +11,7 @@ import {
   waitForVideoFrame,
 } from "@/lib/capture";
 import { DEFAULT_GATEWAY_ADDRESS, getRealtimeUrl, parseGatewayAddress } from "@/lib/gateway";
-import { defaultsFromSchema } from "@/lib/json-schema";
+import { defaultsFromSchema, resolveSchema } from "@/lib/json-schema";
 import {
   assertSecureMediaContext,
   cameraConstraints,
@@ -25,12 +25,15 @@ import { emptyInputFeedback, reduceInputFeedback, type InputFeedback, type Input
 import { updateGuidance, type GuidanceState } from "@/lib/assistant-guidance.mjs";
 import { decodePcmBase64, encodePcmBase64, PcmPlayer } from "@/lib/pcm";
 import { CaptionTimeline } from "@/lib/playback-captions";
+import { createOperatorVoice } from "@/lib/operator-voice.mjs";
 import { emptyPlaybackDiagnostics, recordPlaybackEvent, type PlaybackDiagnostics, type StopReason } from "@/lib/playback-diagnostics.mjs";
 import { appendRuntimeDiagnostic, type RuntimeDiagnosticEntry } from "@/lib/runtime-diagnostics.mjs";
 import { FrameRates, type FrameRateSnapshot } from "@/lib/frame-rates";
 import { readPreference, writePreference, type CaptionSize } from "@/lib/playground-preferences";
-import { SessionEvidence, sessionLogFilename, sanitizeEvidenceSnapshot, safeFailureReason, overloadRecoveryMessage, type EvidenceEvent, type EvidenceReason, type SessionLogSummary, type TranscriptEndReason, type TranscriptInterruptionSource } from "@/lib/session-evidence";
+import { predictionsFilename, SessionEvidence, sessionLogFilename, sanitizeEvidenceSnapshot, safeFailureReason, overloadRecoveryMessage, type EvidenceEvent, type EvidenceReason, type SessionLogSummary, type TranscriptEndReason, type TranscriptInterruptionSource } from "@/lib/session-evidence";
 import { generationConfigErrors, generationEvidence } from "@/lib/generation-config";
+import { defaultProcedure, parseSteps, procedureErrors as validateProcedure, procedureSessionConfig, readStoredProcedure, writeStoredProcedure, type ProcedureConfig } from "@/lib/procedure.mjs";
+import { cleanRunExport, createSessionRun, predictionsFromRun, TRACKER_SETTINGS, turnBreakdown } from "@/lib/session-run.mjs";
 import { SessionLogArchive, type SessionLogArchiveState } from "@/lib/session-log-archive";
 import { canUpdateSessionActivity, describeSessionStatusView, type SessionConnection, type SessionActivity, type SessionStatusBadge } from "@/lib/session-status";
 import {
@@ -64,7 +67,18 @@ export type TranscriptMessage = {
   turnOrder?: number;
   endReason?: TranscriptEndReason;
   interruptionSource?: TranscriptInterruptionSource;
+  /** Sent on the user's behalf; a check-in repeats on a schedule. */
+  origin?: "request" | "check_in";
+  /** Typed by a human operator in Wizard of Oz mode, not produced by a model. */
+  operator?: boolean;
+  /** This reply named the step the tracker now estimates as current. */
+  announced?: boolean;
+  trackerStep?: number;
 };
+
+type SessionRun = ReturnType<typeof createSessionRun>;
+export type SessionRunView = ReturnType<SessionRun["view"]>;
+export type PredictionFilter = "all" | "announced";
 
 export type DebugRawEntry = {
   id: string;
@@ -135,6 +149,22 @@ export type PlaygroundState = {
   debugEntries: DebugRawEntry[];
   playbackDiagnostics: PlaybackDiagnostics;
   runtimeDiagnostics: RuntimeDiagnosticEntry[];
+  procedure: ProcedureConfig;
+  /** The model gets no sound from this library clip: none selected, or the clip has no audio track. */
+  silentLibraryVideo: boolean;
+  procedureErrors: Record<string,string>;
+  setProcedure: (patch: Partial<ProcedureConfig>) => void;
+  /** Live or most recent session; null before the first session. */
+  runView: SessionRunView | null;
+  startHeldPlayback: () => void;
+  /** The Wizard of Oz option is selected: a person types the replies. */
+  wizardMode: boolean;
+  sendOperatorReply: (text: string) => boolean;
+  operatorVoice: boolean;
+  setOperatorVoice: (enabled: boolean) => void;
+  downloadPredictions: (filter: PredictionFilter) => void;
+  downloadSavedPredictions: (startedAt: number, filter: PredictionFilter) => void;
+  predictionDownloadStatus: string;
   isStreaming: boolean;
   sessionActive: boolean;
   canStart: boolean;
@@ -157,6 +187,7 @@ export type PlaygroundState = {
 };
 
 const SESSION_END_ACK_TIMEOUT_MS = 8_000;
+const WIZARD_MODEL_ID = "wizard-of-oz";
 
 type SessionEndWaiter = {
   resolve: () => void;
@@ -228,6 +259,17 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   });
   const microphoneSentRef = useRef(false);
   const evidencePublishedAtRef = useRef(-Infinity);
+  const runRef = useRef<SessionRun | null>(null);
+  const heldPlaybackRef = useRef(false);
+  // Wall-clock zero for sessions without a video element clock (camera).
+  const clipZeroRef = useRef<number | null>(null);
+  const [runView, setRunView] = useState<SessionRunView | null>(null);
+  const [procedure, setProcedureState] = useState<ProcedureConfig>(defaultProcedure);
+  const procedureRef = useRef(procedure);
+  procedureRef.current = procedure;
+  const [predictionDownloadStatus, setPredictionDownloadStatus] = useState("");
+  const [operatorVoice, setOperatorVoiceState] = useState(true);
+  const operatorVoiceRef = useRef(createOperatorVoice());
   const [sessionLogSummary, setSessionLogSummary] = useState<SessionLogSummary | null>(null);
   const [sessionConnection, setSessionConnection] = useState<SessionConnection>("none");
   const [sessionActivity, setSessionActivity] = useState<SessionActivity>("idle");
@@ -281,14 +323,17 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   function downloadEvidence(value:unknown):string {
     const snapshot=sanitizeEvidenceSnapshot(value,false);
     if (!snapshot) return "Download unavailable · retry manually";
+    return downloadJson({session:snapshot},sessionLogFilename(snapshot.startedAt));
+  }
+
+  function downloadJson(value:unknown, filename:string):string {
     let url:string | null=null;
     let anchor:HTMLAnchorElement | null=null;
     try {
-      const bundle={session:snapshot};
-      url=URL.createObjectURL(new Blob([JSON.stringify(bundle)],{type:"application/json"}));
+      url=URL.createObjectURL(new Blob([JSON.stringify(value)],{type:"application/json"}));
       anchor=document.createElement("a");
       anchor.href=url;
-      anchor.download=sessionLogFilename(snapshot.startedAt);
+      anchor.download=filename;
       anchor.hidden=true;
       document.body.appendChild(anchor);
       anchor.click();
@@ -311,6 +356,74 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   function downloadSavedSessionLog(startedAt:number) {
     const log=archiveRef.current?.state().logs.find(item=>item.startedAt === startedAt);
     if (log) setSavedLogDownloadStatus(downloadEvidence(log));
+  }
+
+  function downloadPredictions(filter:PredictionFilter) {
+    const run=runRef.current;
+    const predictions=run ? predictionsFromRun(run.exportForLog(),filter) : null;
+    if (!run || !predictions) { setPredictionDownloadStatus("Predictions need a library clip session."); return; }
+    setPredictionDownloadStatus(downloadJson(predictions,predictionsFilename(run.videoId ?? "clip",run.startedAtMs,filter,run.wizard)));
+  }
+
+  function downloadSavedPredictions(startedAt:number, filter:PredictionFilter) {
+    const log=archiveRef.current?.state().logs.find(item=>item.startedAt === startedAt);
+    const predictions=predictionsFromRun(cleanRunExport(log?.run),filter);
+    if (!log?.run || !predictions) { setPredictionDownloadStatus("This log holds no library clip predictions."); return; }
+    setPredictionDownloadStatus(downloadJson(predictions,predictionsFilename(log.run.videoId ?? "clip",log.startedAt,filter,log.run.wizardOfOz)));
+  }
+
+  /** Library clips use the element's clock, so pauses and seeks stay aligned. */
+  function clipTimeS():number|null {
+    if (heldPlaybackRef.current) return null;
+    if (videoSourceRef.current === "file") return videoRef.current?.currentTime ?? null;
+    return clipZeroRef.current === null ? null : (Date.now()-clipZeroRef.current)/1000;
+  }
+
+  function publishRun() {
+    const run=runRef.current;
+    if (!run) return;
+    for (const row of run.takeClosedTurns()) {
+      const turn=turnBreakdown(row);
+      recordEvidence("turn_latency",{turnIndex:turn.index,turnKind:turn.kind,turnStatus:turn.status,prepareMs:turn.prepareMs,deliveryMs:turn.deliveryMs,
+        firstTextMs:turn.firstTextMs,firstAudioMs:turn.firstAudioMs,replyMs:turn.replyMs,replyChars:turn.replyChars,sentences:turn.sentences,computeMs:turn.computeMs,inputAgeMs:turn.inputAgeMs});
+    }
+    setRunView(run.view(Date.now(),clipTimeS()));
+  }
+
+  /** Marks the clip's zero and starts it. Only a held session needs the seek. */
+  function startPlayback(reason:"request_sent"|"user_skipped"|"no_video_hold") {
+    const run=runRef.current;
+    if (!run) return;
+    const now=Date.now();
+    const wasHeld=heldPlaybackRef.current;
+    heldPlaybackRef.current=false;
+    clipZeroRef.current??=now;
+    const holdStartedAt=run.view(now).hold?.startedAtMs;
+    run.playbackStarted(now,reason);
+    recordEvidence("playback_hold",{holdState:reason === "user_skipped" ? "skipped" : wasHeld ? "playing" : "not_held",...(holdStartedAt === undefined ? {} : {holdMs:now-holdStartedAt})});
+    const video=videoRef.current;
+    if (wasHeld && video && videoSourceRef.current === "file") {
+      video.currentTime=0;
+      void video.play().catch(()=>setSessionNotice("The browser blocked playback. Press play on the video to start it."));
+    }
+    publishRun();
+  }
+
+  function startHeldPlayback() {
+    if (heldPlaybackRef.current) startPlayback("user_skipped");
+  }
+
+  function beginProcedureDelivery(run:SessionRun) {
+    const request=run.procedure?.instruction;
+    if (!request) return;
+    if (speechRef.current?.typed_input !== true) {
+      const detail="Typed speech is unavailable, so the request was not sent. Say it into the microphone, then start the video.";
+      run.holdUnavailable(detail);
+      recordEvidence("playback_hold",{holdState:"unavailable"});
+      if (!heldPlaybackRef.current) { setSessionNotice(detail); startPlayback("no_video_hold"); }
+      return;
+    }
+    void deliverTyped(request,"request");
   }
 
   function clearSavedSessionLogs() {
@@ -356,6 +469,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [config, setConfig] = useState<Record<string, unknown>>(() =>
     initialModel ? defaultsFromSchema(initialModel.config_schema) : {}
   );
+  const wizardMode = selectedModelId === WIZARD_MODEL_ID;
   const [serverAddress, setServerAddressState] = useState(DEFAULT_GATEWAY_ADDRESS);
   const [framesPerSecond, setFramesPerSecondState] = useState(DEFAULT_FRAMES_PER_SECOND);
   const [frameRates, setFrameRates] = useState<FrameRateSnapshot>({captured:null,submitted:null,upstream:null});
@@ -400,6 +514,28 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [microphoneSpeechActive, setMicrophoneSpeechActive] = useState(false);
 
   useEffect(() => {
+    // Browser storage is unavailable during SSR; hydrate once after the matching first render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setProcedureState(readStoredProcedure());
+  }, []);
+
+  function setProcedure(patch:Partial<ProcedureConfig>) {
+    // Prompt, steps and schedule are fixed at session start so one log has one configuration.
+    const liveEditable=Object.keys(patch).every(key=>key === "showOnlyNewSteps" || key === "speakOnlyNewSteps");
+    if (phase !== "idle" && !liveEditable) return;
+    const next={...procedureRef.current,...patch};
+    procedureRef.current=next;
+    setProcedureState(next);
+    writeStoredProcedure(next);
+    const run=runRef.current;
+    if (liveEditable && run && phase === "live") {
+      run.setGate({show:next.showOnlyNewSteps,speak:next.speakOnlyNewSteps});
+      recordEvidence("procedure_config",{showOnlyNewSteps:next.showOnlyNewSteps,speakOnlyNewSteps:next.speakOnlyNewSteps});
+      publishRun();
+    }
+  }
+
+  useEffect(() => {
     const volume = readPreference("modelVolume");
     const captions = readPreference("captionsEnabled");
     modelVolumeRef.current = volume;
@@ -415,6 +551,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setCaptionBackgroundOpacityState(readPreference("captionBackgroundOpacity"));
     pcmPlayerRef.current?.setVolume(volume);
     pcmPlayerRef.current?.setMuted(volume === 0);
+    operatorVoiceRef.current.setOutput({muted:volume === 0,volume});
   }, []);
 
   function setCaptionSize(size: CaptionSize) {
@@ -445,6 +582,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (volume === 0) captionTimelineRef.current.mute(pcmPlayerRef.current?.clockTime() ?? 0, performance.now());
     pcmPlayerRef.current?.setVolume(volume);
     pcmPlayerRef.current?.setMuted(volume === 0);
+    operatorVoiceRef.current.setOutput({muted:volume === 0,volume});
     writePreference("modelVolume", volume);
   }
 
@@ -458,6 +596,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       microphoneSpeechActiveRef.current = false;
       setMicrophoneSpeechActive(false);
       recordEvidence("input_status", {source:"microphone",state:"speech_end"});
+      runRef.current?.voiceEnd(Date.now());
     },
     onPermissionGranted: devices.refresh,
     onMicrophoneChunk: sendMicrophone,
@@ -601,6 +740,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function stopPcmPlayer(clearReason:"reset"|"session_ended" = "reset") {
+    operatorVoiceRef.current.stop();
     cancelCaptions(clearReason);
     if (captionTimerRef.current !== null) window.clearInterval(captionTimerRef.current);
     captionTimerRef.current = null;
@@ -633,6 +773,16 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       recordEvidence("caption_timeline",{captionState:"cleared",captionClearReason,source,textChars:0});
     }
     captionObservationKeyRef.current=null;
+  }
+
+  function sendOperatorReply(text:string):boolean {
+    const trimmed=text.trim();
+    const socket=socketRef.current;
+    if (!trimmed || !runRef.current?.wizard || !liveRef.current || socket?.readyState !== WebSocket.OPEN) return false;
+    try { socket.send(encodeClientMessage({type:"input.operator",text:trimmed})); }
+    catch { return false; }
+    recordEvidence("operator_reply",{textChars:trimmed.length,clipS:clipTimeS()});
+    return true;
   }
 
   function cancelCaptions(reason:"reset"|"interrupted"|"session_ended"|"failure" = "reset", source?:StopReason) {
@@ -715,12 +865,16 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   function replyPlaybackActive(): boolean {
-    return assistantTurnOpenRef.current || Boolean(pcmPlayerRef.current?.isActive()) || captionTimelineRef.current.isActive();
+    return assistantTurnOpenRef.current || Boolean(pcmPlayerRef.current?.isActive()) || captionTimelineRef.current.isActive()
+      || (Boolean(runRef.current?.wizard) && operatorVoiceRef.current.speaking());
   }
 
   function interruptPlayback(reason: StopReason = 'typed', clearActivity=true) {
     const queuedAudioMs=pcmPlayerRef.current?.queuedMs() ?? 0;
     recordEvidence("interrupt",{source:reason,queuedAudioMs});
+    runRef.current?.interrupt({clipS:clipTimeS(),wallMs:Date.now()});
+    publishRun();
+    operatorVoiceRef.current.stop();
     if (clearActivity) setSessionActivity(current=>reason === "server" && current !== "responding" ? current : "idle");
     if (replyPlaybackActive()) {
       setPlaybackDiagnostics((current) => recordPlaybackEvent(current, {type:'interrupt',reason}));
@@ -745,6 +899,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     microphoneSpeechActiveRef.current = true;
     setMicrophoneSpeechActive(true);
     recordEvidence("input_status",{source:"microphone",state:"speech_onset"});
+    runRef.current?.voiceStart(Date.now());
     if (replyPlaybackActive()) {
       interruptPlayback('microphone');
     }
@@ -819,6 +974,9 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setMessages([]);
     setGuidance(null);
     setDebugEntries([]);
+    runRef.current?.cancelHold(Date.now());
+    heldPlaybackRef.current = false;
+    publishRun();
   }
 
   function cleanupSession() {
@@ -966,6 +1124,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         captionTimelineRef.current.cancel();
         if (captionTimerRef.current !== null) window.clearInterval(captionTimerRef.current);
         captionTimerRef.current = window.setInterval(refreshCaptions,50);
+        {
+          const run=runRef.current;
+          if (run?.procedure) beginProcedureDelivery(run);
+          else if (run) startPlayback("no_video_hold");
+        }
         break;
       case "input.transcription":
       case "input.status": {
@@ -1000,6 +1163,17 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
             if (message.turn_order > lastReplyOrderRef.current && replyPlaybackActive()) interruptPlayback('input-transcription');
           }
         }
+        if (message.type === "input.status") {
+          const run=runRef.current;
+          run?.inputStatus(message.input_id,message.state,Date.now(),message.detail);
+          if (run?.isRequest(message.input_id)) {
+            recordEvidence("playback_hold",{holdState:message.state});
+            // Once the video has been started by hand, later statuses change nothing.
+            if (message.state === "sent" && heldPlaybackRef.current) startPlayback("request_sent");
+            else if (["sent","failed","cancelled"].includes(message.state) && !heldPlaybackRef.current && !run.playbackHasStarted()) startPlayback("no_video_hold");
+          }
+          publishRun();
+        }
         if (eligible && message.type === 'input.status' && message.input_id === typedWaiterRef.current?.id) {
           if (message.state === 'waiting') { finishTyped(true); resetMicrophone(); }
           if (message.state === 'failed' || message.state === 'cancelled') {
@@ -1019,7 +1193,11 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
             ...(native ? {native_kind:native.kind,native_matched:native.matched,native_input_sequence:native.input_sequence,
               native_input_age_ms:native.input_age_ms,native_input_frames:native.input_frames,native_input_audio_ms:native.input_audio_ms,
               native_force_listen:native.force_listen,native_force_source:native.force_source,native_listen_events:native.listen_events,
-              native_listen_streak:native.listen_streak,native_since_content_ms:native.since_content_ms} : {})});
+              native_listen_streak:native.listen_streak,native_since_content_ms:native.since_content_ms} : {}),
+            ...(diagnostic.units ? {speak_units:diagnostic.units.speak,listen_units:diagnostic.units.listen,overruns:diagnostic.units.overruns,
+              last_compute_ms:diagnostic.units.last_compute_ms,max_compute_ms:diagnostic.units.max_compute_ms} : {})});
+          runRef.current?.noteRuntime({...(diagnostic.units?.last_compute_ms === undefined ? {} : {computeMs:diagnostic.units.last_compute_ms}),
+            ...(native?.input_age_ms === undefined ? {} : {inputAgeMs:native.input_age_ms})});
           frameRatesRef.current.upstream(message.diagnostic.input.frames, performance.now());
           const entries = appendRuntimeDiagnostic(runtimeDiagnosticsRef.current, message.diagnostic, Date.now());
           if (entries !== runtimeDiagnosticsRef.current) {
@@ -1079,10 +1257,52 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         if (presentableInput) {
           suppressInputBargeInRef.current = true;
         }
-        if (replyIsCurrent && chunk.length) captionTimelineRef.current.addText(chunk,message.caption_unit,performance.now());
-        if (message.audio) {
-          const interval=playReplyAudio(message.audio, replyIsCurrent, message.caption_unit);
-          if (replyIsCurrent) captionTimelineRef.current.schedule(message.caption_unit,interval,performance.now());
+        const presentText=(text:string, unit:number|undefined) => {
+          if (text.length) captionTimelineRef.current.addText(text,unit,performance.now());
+        };
+        const presentAudio=(pcm:string|null|undefined, unit:number|undefined) => {
+          if (!pcm) return;
+          captionTimelineRef.current.schedule(unit,playReplyAudio(pcm,true,unit),performance.now());
+        };
+        const run=runRef.current;
+        // A dropped chunk ends what was shown of that reply, so its partial sentence must not join the next reply.
+        if (run && !replyIsCurrent && (chunk.length > 0 || message.audio || message.final)) run.interrupt({clipS:clipTimeS(),wallMs:Date.now()});
+        const replyStep=run && replyIsCurrent ? run.replyChunk({text:chunk,audio:message.audio ?? null,unit:message.caption_unit,final:message.final,clipS:clipTimeS(),wallMs:Date.now()}) : null;
+        if (replyStep) {
+          presentText(replyStep.text,message.caption_unit);
+          presentAudio(replyStep.audio,message.caption_unit);
+          for (const item of replyStep.release) {
+            presentText(item.text,item.unit);
+            presentAudio(item.audio,item.unit);
+          }
+          for (const item of replyStep.dropped) {
+            // Counted as discarded playback; captions fall back to their own timing.
+            if (item.audio) {
+              playReplyAudio(item.audio,false,item.unit);
+              captionTimelineRef.current.schedule(item.unit,null,performance.now());
+            }
+          }
+          if (replyStep.dropped.length) {
+            recordEvidence("step_gate",{gateDecision:"dropped",withheldChars:replyStep.dropped.reduce((sum,item)=>sum+item.text.length,0),
+              withheldAudioBytes:replyStep.dropped.reduce((sum,item)=>sum+(item.audio?.length ?? 0)*3/4,0)});
+          }
+          if (replyStep.release.length) recordEvidence("step_gate",{gateDecision:"released",releasedItems:replyStep.release.length});
+          for (const transition of replyStep.transitions) {
+            recordEvidence("tracker_transition",{fromStep:transition.from+1,toStep:transition.to+1,belief:transition.belief,clipS:transition.clipS,
+              decidedClipS:transition.decidedClipS,stepMatched:transition.mapped !== null,...(transition.mapped === null ? {} : {mappedStep:transition.mapped+1})});
+          }
+        } else {
+          if (replyIsCurrent) presentText(chunk,message.caption_unit);
+          if (message.audio) {
+            const interval=playReplyAudio(message.audio, replyIsCurrent, message.caption_unit);
+            if (replyIsCurrent) captionTimelineRef.current.schedule(message.caption_unit,interval,performance.now());
+          }
+        }
+        const stepFields={...(replyStep?.announcedStep === null || replyStep?.announcedStep === undefined ? {} : {announced:true,trackerStep:replyStep.announcedStep}),
+          ...(run?.wizard ? {operator:true} : {})};
+        if (run?.wizard && replyIsCurrent && presentable) {
+          const speakGated=run.tracker !== null && procedureRef.current.speakOnlyNewSteps;
+          if (!speakGated || (replyStep?.announcedStep ?? null) !== null) operatorVoiceRef.current.speak(chunk);
         }
         if ((message.audio || presentable) && !message.final) {
           assistantTurnOpenRef.current = true;
@@ -1144,6 +1364,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
                       text: `${entry.text}${chunk}`,
                       streaming: !message.final,
                       ...(message.final ? {endReason:"model_final" as const} : {}),
+                      ...stepFields,
                     }
                   : entry
               )
@@ -1162,13 +1383,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
                 text: chunk,
                 streaming: !message.final,
                 ...(message.final ? {endReason:"model_final" as const} : {}),
+                ...stepFields,
               },
             ]);
           }
         } else if (streamingAssistantIdRef.current && message.final) {
           const streamingId = streamingAssistantIdRef.current;
           setMessages((current) =>
-            current.map((entry) => (entry.id === streamingId ? { ...entry, streaming: false, ...(replyIsCurrent ? {endReason:"model_final" as const} : {}) } : entry))
+            current.map((entry) => (entry.id === streamingId ? { ...entry, streaming: false, ...(replyIsCurrent ? {endReason:"model_final" as const} : {}), ...stepFields } : entry))
           );
         }
 
@@ -1222,6 +1444,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         refreshCaptions();
 
         setIsStreaming(replyIsCurrent && !message.final);
+        if (replyStep) publishRun();
         break;
       }
       case "error":
@@ -1230,6 +1453,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         if (typedWaiterRef.current) {
           applyInputFeedback({type:'input.status',session_id:feedbackRef.current.sessionId ?? '',input_id:typedWaiterRef.current.id,
             source:'typed',turn_order:feedbackRef.current.latestOrder,state:'failed',detail:message.message});
+          runRef.current?.inputStatus(typedWaiterRef.current.id,"failed",Date.now(),message.message);
+          publishRun();
           finishTyped(false);
           setSessionActivity(current=>current === "responding" ? current : "idle");
         }
@@ -1410,6 +1635,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (!ready || element.error) {
       throw new Error(videoFileErrorMessage());
     }
+    if (heldPlaybackRef.current) {
+      element.pause();
+      return;
+    }
     void element.play().catch(() => undefined);
   }
 
@@ -1517,6 +1746,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setMessages([]);
     setGuidance(null);
     setSessionNotice(null);
+    setPredictionDownloadStatus("");
     setDebugEntries([]);
     runtimeDiagnosticsRef.current = [];
     setRuntimeDiagnostics([]);
@@ -1539,7 +1769,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
 
     const model = selectedModelRef.current;
-    const sessionConfig = { ...configRef.current };
+    let sessionConfig: Record<string, unknown> = { ...configRef.current };
     if (!model) {
       recordSessionFailure("startup_failed");
       setPhase("idle");
@@ -1554,7 +1784,48 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
     const requestedGeneration = generationEvidence(model.id, model.config_schema, sessionConfig);
     if (requestedGeneration) recordEvidence("generation_config", requestedGeneration);
-    recordEvidence("client_config", {customPromptPresent:typeof sessionConfig.system_prompt === "string" && sessionConfig.system_prompt.trim().length > 0});
+    const procedureNow=procedureRef.current;
+    if (procedureNow.enabled && Object.keys(validateProcedure(procedureNow)).length) {
+      recordSessionFailure("startup_failed");
+      setFatalError("Check the Procedure Mode fields before starting.");
+      cleanupSession();
+      return;
+    }
+    const fileSource=videoSourceRef.current === "file";
+    const built=procedureNow.enabled
+      ? procedureSessionConfig(resolveSchema(model.config_schema,model.config_schema).properties,sessionConfig,procedureNow,{silentVideo:fileSource && !(audio.videoAudioSelected && videoAudioStreamRef.current?.getAudioTracks().length)})
+      : null;
+    if (built) sessionConfig=built.config;
+    const run=createSessionRun({
+      procedure:built ? {task:procedureNow.task.trim(),steps:parseSteps(procedureNow.stepsText),instruction:procedureNow.instruction.trim(),prompt:built.prompt,
+        responsePolicy:built.policySupported ? "none" : "not_supported",checkIns:{enabled:procedureNow.checkIns,intervalS:procedureNow.checkInInterval,text:procedureNow.checkInText.trim()},
+        tracker:procedureNow.tracker,showOnlyNewSteps:procedureNow.showOnlyNewSteps,speakOnlyNewSteps:procedureNow.speakOnlyNewSteps} : null,
+      videoId:fileSource ? activeVideo?.origin?.name ?? activeVideo?.name ?? null : null,
+      startedAtMs:Date.now(),
+      wizard:model.id === WIZARD_MODEL_ID,
+    });
+    runRef.current=run;
+    clipZeroRef.current=null;
+    evidenceRef.current?.attachRun(()=>cleanRunExport(run.exportForLog()));
+    recordEvidence("procedure_config",{procedureEnabled:!!built,...(run.procedure ? {stepCount:run.procedure.steps.length,instructionChars:run.procedure.instruction.length,
+      responsePolicy:run.procedure.responsePolicy,checkInsEnabled:run.procedure.checkIns.enabled,checkInIntervalS:run.procedure.checkIns.intervalS,
+      trackerEnabled:run.procedure.tracker,showOnlyNewSteps:run.procedure.showOnlyNewSteps,speakOnlyNewSteps:run.procedure.speakOnlyNewSteps,videoHeld:fileSource,
+      ...(run.procedure.tracker ? TRACKER_SETTINGS : {})} : {})});
+    if (built && !built.promptSupported && !run.wizard) setSessionNotice("This model takes no system prompt, so the task and steps were not sent.");
+    if (run.procedure) {
+      run.beginHold(Date.now(),{videoHeld:fileSource});
+      if (fileSource) {
+        heldPlaybackRef.current=true;
+        const video=videoRef.current;
+        if (video) {
+          video.pause();
+          if (video.readyState > 0) video.currentTime=0;
+        }
+        recordEvidence("playback_hold",{holdState:"started"});
+      }
+    }
+    publishRun();
+    recordEvidence("client_config", {customPromptPresent:typeof sessionConfig.system_prompt === "string" && sessionConfig.system_prompt.trim().length > 0,wizardOfOz:run.wizard});
 
     let socket:WebSocket;
     try {
@@ -1622,7 +1893,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         return;
       }
       recordSessionFailure("socket_closed");
-      setFatalError((current) => current ?? "Session ended");
+      setFatalError((current) => current ?? "The connection to the gateway closed. Start a new session.");
       cleanupSession();
     };
   }
@@ -1717,6 +1988,39 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     }
   }
 
+  /** Typed speech or text input. A request or check-in is sent on the user's behalf, so it does not interrupt. */
+  function deliverTyped(text:string, origin?:"request"|"check_in"):Promise<boolean> {
+    const nativeJoyInput = selectedModelIdRef.current === 'joyai-vl' && speechRef.current?.typed_input === true;
+    const socket = socketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+    const id = crypto.randomUUID();
+    if (!origin) interruptPlayback();
+    resetMicrophone();
+    applyInputFeedback({type:'typed',input_id:id,text,transport:nativeJoyInput ? 'text' : 'speech',...(origin ? {origin} : {})});
+    recordEvidence("input",{source:"typed",inputId:id,textChars:text.length});
+    runRef.current?.inputQueued(id,origin ?? "typed",Date.now());
+    publishRun();
+    setSessionActivity(nativeJoyInput ? "sending" : "preparing");
+    setRecoverableError(null);
+    const sent = new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => {
+        if (typedWaiterRef.current?.id !== id) return;
+        finishTyped(false);
+        recordSessionFailure("typed_timeout");
+        setFatalError('Typed instruction timed out. Start a new session before retrying.');
+        void endSession();
+      }, 70_000);
+      typedWaiterRef.current = {id,resolve,timer};
+    });
+    try { socket.send(encodeClientMessage({type:'input.typed',request_id:id,text})); }
+    catch {
+      recordSessionFailure("send_failed");
+      setFatalError("The instruction could not be sent. Start a fresh session before retrying.");
+      finishTyped(false); cleanupSession();
+    }
+    return sent;
+  }
+
   async function sendText(text: string) {
     const trimmed = text.trim();
     if (!trimmed) {
@@ -1728,7 +2032,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       return false;
     }
     const nativeJoyInput = selectedModelIdRef.current === 'joyai-vl' && speechRef.current?.typed_input === true;
-    if (selectedModelIdRef.current === 'minicpm-o-4-5' || nativeJoyInput) {
+    const standInTyped = (selectedModelIdRef.current === 'mock' || selectedModelIdRef.current === WIZARD_MODEL_ID) && speechRef.current?.typed_input === true;
+    if (selectedModelIdRef.current === 'minicpm-o-4-5' || nativeJoyInput || standInTyped) {
       if (nativeJoyInput && !sourceLiveRef.current) {
         setRecoverableError('Turn on the camera or choose a video before sending a JoyAI instruction');
         return false;
@@ -1737,32 +2042,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         setRecoverableError('Use 1–500 characters for a typed instruction');
         return false;
       }
-      const socket = socketRef.current;
-      if (socket?.readyState !== WebSocket.OPEN) return false;
-      const id = crypto.randomUUID();
-      interruptPlayback();
-      resetMicrophone();
-      applyInputFeedback({type:'typed',input_id:id,text,transport:nativeJoyInput ? 'text' : 'speech'});
-      recordEvidence("input",{source:"typed",inputId:id,textChars:text.length});
-      setSessionActivity(nativeJoyInput ? "sending" : "preparing");
-      setRecoverableError(null);
-      const sent = new Promise<boolean>(resolve => {
-        const timer = setTimeout(() => {
-          if (typedWaiterRef.current?.id !== id) return;
-          finishTyped(false);
-          recordSessionFailure("typed_timeout");
-          setFatalError('Typed instruction timed out. Start a new session before retrying.');
-          void endSession();
-        }, 70_000);
-        typedWaiterRef.current = {id,resolve,timer};
-      });
-      try { socket.send(encodeClientMessage({type:'input.typed',request_id:id,text})); }
-      catch {
-        recordSessionFailure("send_failed");
-        setFatalError("The instruction could not be sent. Start a fresh session before retrying.");
-        finishTyped(false); cleanupSession();
-      }
-      return sent;
+      return deliverTyped(text);
     }
     interruptPlayback();
     let accepted = false;
@@ -1842,14 +2122,52 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
 
   useEffect(() => {
     if (phase !== "live") return;
-    const timer = window.setInterval(() => setFrameRates(frameRatesRef.current.read(performance.now())), 1000);
+    const timer = window.setInterval(() => {
+      setFrameRates(frameRatesRef.current.read(performance.now()));
+      publishRun();
+    }, 1000);
     return () => window.clearInterval(timer);
+    // Reads only refs and state setters; the interval restarts with each session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
+
+  // Scheduled check-ins are off by default and start only once playback has started.
+  useEffect(() => {
+    if (phase !== "live" || !runRef.current?.procedure?.checkIns.enabled) return;
+    const timer = window.setInterval(() => {
+      const run = runRef.current;
+      const text = run?.procedure?.checkIns.text;
+      if (!run || !text || !liveRef.current || stoppingRef.current) return;
+      const clipS = clipTimeS();
+      if (clipS === null) return;
+      const video = videoRef.current;
+      const decision = run.checkInTick({clipS,wallMs:Date.now(),
+        playing:videoSourceRef.current !== "file" || (!!video && !video.paused && !video.ended),
+        busy:feedbackRef.current.busy,replying:replyPlaybackActive(),speaking:microphoneSpeechActiveRef.current,
+        typedAvailable:speechRef.current?.typed_input === true});
+      if (!decision) return;
+      recordEvidence("check_in",{checkInState:decision.state,checkInIndex:decision.index,dueClipS:decision.dueS,queuedClipS:decision.queuedClipS,skipReason:decision.reason});
+      publishRun();
+      if (decision.state !== "queued") return;
+      void deliverTyped(text,"check_in").then(delivered => {
+        const result = run.checkInResult(decision.index,delivered,{clipS:clipTimeS(),wallMs:Date.now()});
+        // A slow failure can outlive its session. Never write it into a newer log.
+        if (!result || runRef.current !== run) return;
+        recordEvidence("check_in",{checkInState:result.state,checkInIndex:result.index,dueClipS:result.dueS,sentClipS:result.sentClipS});
+        publishRun();
+      });
+    }, 250);
+    return () => window.clearInterval(timer);
+    // The interval reads refs; it must not restart on each diagnostic render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
   const generationValid = useMemo(() => !selectedModel ||
     Object.keys(generationConfigErrors(selectedModel.id, selectedModel.config_schema, config)).length === 0,
   [selectedModel, config]);
   const sessionActive = phase !== "idle";
+  const procedureErrors = useMemo(() => validateProcedure(procedure), [procedure]);
+  const procedureValid = Object.keys(procedureErrors).length === 0;
   const sessionStatusView = describeSessionStatusView({phase,connection:sessionConnection,activity:sessionActivity,mode:audio.mode,holding:audio.holding,listening:audio.listening,pending:audio.pending,micError:Boolean(audio.error),speaking:microphoneSpeechActive,watching:(frameRates.submitted ?? 0) > 0});
 
   return {
@@ -1884,6 +2202,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
       setModelMuted(modelMutedRef.current);
       if (modelMutedRef.current) captionTimelineRef.current.mute(pcmPlayerRef.current?.clockTime() ?? 0,performance.now());
       pcmPlayerRef.current?.setMuted(modelMutedRef.current);
+      operatorVoiceRef.current.setOutput({muted:modelMutedRef.current,volume:modelVolumeRef.current});
     },
     selectedModel,
     phase,
@@ -1943,9 +2262,25 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     debugEntries,
     playbackDiagnostics,
     runtimeDiagnostics,
+    procedure,
+    silentLibraryVideo: videoSource === "file" && !(audio.videoAudioSelected && videoAudioStream),
+    procedureErrors,
+    setProcedure,
+    runView,
+    startHeldPlayback,
+    wizardMode,
+    sendOperatorReply,
+    operatorVoice,
+    setOperatorVoice:(enabled:boolean)=>{
+      operatorVoiceRef.current.setEnabled(enabled);
+      setOperatorVoiceState(enabled);
+    },
+    downloadPredictions,
+    downloadSavedPredictions,
+    predictionDownloadStatus,
     isStreaming,
     sessionActive,
-    canStart: catalogStatus === "ready" && Boolean(selectedModel) && phase === "idle" && generationValid,
+    canStart: catalogStatus === "ready" && Boolean(selectedModel) && phase === "idle" && generationValid && procedureValid,
     videoRef,
     setSelectedModelId: (id: string) => {
       if (sessionActive) {

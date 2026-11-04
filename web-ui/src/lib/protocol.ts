@@ -20,12 +20,14 @@ export type InputAppendMessage = {
 };
 
 export type InputTypedMessage = {type:"input.typed"; request_id:string; text:string};
+/** Wizard of Oz only: a human operator's reply, refused by real model adapters. */
+export type InputOperatorMessage = {type:"input.operator"; text:string};
 export type InputMicrophoneMessage = {type:"input.microphone"; generation:number; sequence:number; enabled:boolean; pcm?:string};
 export type SpeechCapabilities = {version:1; transcription:boolean; typed_input:boolean; spoken_interruption?:boolean; reason?:string};
 export type InputTranscriptionMessage = {type:"input.transcription"; session_id:string; source:"voice"; utterance_id:string; generation:number; turn_order:number; revision:number; text:string; final:boolean};
 export type InputStatusMessage = {type:"input.status"; session_id:string; input_id:string; source:"voice"|"typed"; generation?:number; turn_order:number; state:"transcribing"|"preparing"|"sending"|"sent"|"waiting"|"failed"|"cancelled"; detail?:string};
-export type InputFeedbackEvent = InputTranscriptionMessage | InputStatusMessage | {type:"microphone";generation:number} | {type:"assistant";turn_order?:number} | {type:"typed";input_id:string;text:string;transport?:"speech"|"text"};
-export type ClientMessage = SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage;
+export type InputFeedbackEvent = InputTranscriptionMessage | InputStatusMessage | {type:"microphone";generation:number} | {type:"assistant";turn_order?:number} | {type:"typed";input_id:string;text:string;transport?:"speech"|"text";origin?:"request"|"check_in"};
+export type ClientMessage = SessionStartMessage | SessionEndMessage | InputAppendMessage | InputTypedMessage | InputMicrophoneMessage | InputOperatorMessage;
 
 export type SessionStartedMessage = {
   type: "session.started";

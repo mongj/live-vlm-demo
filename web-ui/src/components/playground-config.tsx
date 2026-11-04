@@ -1,6 +1,8 @@
 "use client";
 
+import { ConfigSection } from "@/components/config-section";
 import { ConnectionStatus } from "@/components/connection-status";
+import { ProcedureSection } from "@/components/procedure-section";
 import { SchemaForm } from "@/components/schema-form";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -19,36 +21,14 @@ import { MAX_FRAMES_PER_SECOND, MIN_FRAMES_PER_SECOND } from "@/lib/capture";
 import { GATEWAY_ADDRESS_PLACEHOLDER } from "@/lib/gateway";
 import { generationConfigErrors, generationDefaults, SAMPLING_KEYS, splitGenerationSchema } from "@/lib/generation-config";
 import { ChevronDownIcon } from "lucide-react";
-import type { ReactNode } from "react";
 
 type PlaygroundConfigProps = {
   playground: PlaygroundState;
 };
 
-export function ConfigSection({
-  title,
-  subtitle,
-  children,
-  defaultOpen = true,
-}: {
-  title: string;
-  subtitle: string;
-  children: ReactNode;
-  defaultOpen?: boolean;
-}) {
-  return (
-    <Collapsible className="group/collapsible flex min-w-0 flex-col" defaultOpen={defaultOpen}>
-      <CollapsibleTrigger className="flex w-full min-w-0 cursor-pointer items-center justify-between gap-2 bg-transparent px-4 py-4 text-left outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 [&_svg]:size-4">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium">{title}</p>
-          <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
-        </div>
-        <ChevronDownIcon className="shrink-0 self-center text-muted-foreground transition-transform duration-200 in-data-[state=open]:rotate-180" />
-      </CollapsibleTrigger>
-      <CollapsibleContent className="min-w-0">{children}</CollapsibleContent>
-    </Collapsible>
-  );
-}
+const PROCEDURE_FIELDS = ["system_prompt", "response_policy"] as const;
+
+export { ConfigSection };
 
 export function ModelSelector({
   playground,
@@ -115,7 +95,7 @@ export function CatalogRetryButton({ playground }: PlaygroundConfigProps) {
 }
 
 export function ModelConfigSection({ playground }: PlaygroundConfigProps) {
-  const { selectedModel, catalogError, sessionActive, config, setConfigValue } = playground;
+  const { selectedModel, catalogError, sessionActive, config, setConfigValue, procedure } = playground;
   const split = selectedModel ? splitGenerationSchema(selectedModel.id, selectedModel.config_schema) : null;
   const errors = selectedModel ? generationConfigErrors(selectedModel.id, selectedModel.config_schema, config) : {};
 
@@ -126,10 +106,12 @@ export function ModelConfigSection({ playground }: PlaygroundConfigProps) {
           <div className="flex flex-col gap-4">
           <SchemaForm
             disabled={sessionActive}
+            disabledFields={procedure.enabled ? PROCEDURE_FIELDS : undefined}
             onChange={setConfigValue}
             schema={split?.basic ?? selectedModel.config_schema}
             values={config}
           />
+          {procedure.enabled ? <p className="text-xs text-muted-foreground">Procedure Mode sets the system prompt and response policy for this session.</p> : null}
           {split?.advanced ? (
             <Collapsible className="group/advanced flex flex-col gap-3" defaultOpen={false}>
               <CollapsibleTrigger asChild>
@@ -242,6 +224,8 @@ export function PlaygroundConfigSections({
 }) {
   return (
     <div className="min-h-0 min-w-0">
+      <ProcedureSection idPrefix={`${framesPerSecondId}-procedure`} playground={playground} />
+      <Separator />
       <ModelConfigSection playground={playground} />
       <Separator />
       <ClientConfigSection id={framesPerSecondId} playground={playground} />
@@ -276,6 +260,7 @@ export function SessionActionButton({
       key="start"
       onClick={() => void start()}
       size={size}
+      title={Object.keys(playground.procedureErrors).length ? "Complete the Procedure Mode fields in the settings before starting" : undefined}
       type="button"
       variant="default"
     >

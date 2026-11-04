@@ -6,10 +6,10 @@ import { guidanceBoxStyle, guidanceView, videoSessionView, type GuidanceState } 
 import { createStageFullscreen, type StageFullscreenState } from "@/lib/stage-fullscreen.mjs";
 import type { SessionStatusBadge } from "@/lib/session-status";
 import type { CaptionSize } from "@/lib/playground-preferences";
-import type { CameraViewState, VideoSourceKind } from "@/hooks/use-playground";
+import type { CameraViewState, SessionRunView, VideoSourceKind } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
 import type { VideoRecord } from "@/lib/video-library/types";
-import { MaximizeIcon, MinimizeIcon } from "lucide-react";
+import { CheckIcon, LoaderCircleIcon, MaximizeIcon, MinimizeIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
 
 type CameraWorkspaceProps = {
@@ -30,6 +30,10 @@ type CameraWorkspaceProps = {
   sessionNotice: string | null;
   sessionBadge?: SessionStatusBadge;
   sessionStartedAtMonotonicMs?: number | null;
+  /** Set while a library video waits for the procedure request. */
+  playbackHold?: NonNullable<SessionRunView["hold"]> | null;
+  onStartHeldPlayback?: () => void;
+  stepBadge?: string | null;
   onFullscreenLayoutLock: (locked: boolean) => void;
   stageClassName?: string;
   controlBar: ReactNode;
@@ -168,6 +172,60 @@ function SessionElapsed({ startedAtMonotonicMs }: { startedAtMonotonicMs: number
   return <span aria-label={`Session elapsed ${elapsed}`} aria-live="off" className="shrink-0 tabular-nums" role="timer">{elapsed}</span>;
 }
 
+const HOLD_STAGES = [
+  {id:"waiting_session", label:"Connecting to the model"},
+  {id:"preparing", label:"Preparing your request as speech"},
+  {id:"sending", label:"Sending your request to the model"},
+  {id:"playing", label:"Starting the video"},
+] as const;
+
+function HoldElapsed({ startedAtMs }: { startedAtMs: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <span className="tabular-nums">{Math.max(0, (now - startedAtMs) / 1000).toFixed(0)} s</span>;
+}
+
+/** Truthful progress only: each row moves on an actual status from the gateway. */
+function PlaybackHoldOverlay({ hold, onStart }: { hold: NonNullable<SessionRunView["hold"]>; onStart?: () => void }) {
+  const problem = hold.stage === "failed" || hold.stage === "unavailable";
+  const currentIndex = HOLD_STAGES.findIndex(stage => stage.id === hold.stage);
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/55 p-3" data-slot="playback-hold">
+      <div className="max-h-full w-full max-w-sm overflow-y-auto rounded-lg border bg-background p-3 text-foreground shadow-lg" role="status" aria-live="polite">
+        <p className="text-sm font-medium">{problem ? "Your request was not sent" : "Sending your request before the video starts"}</p>
+        {problem ? (
+          <p className="mt-1 flex items-start gap-1.5 text-xs text-muted-foreground">
+            <TriangleAlertIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+            <span className="wrap-anywhere">{hold.detail ?? "The request could not be delivered."}</span>
+          </p>
+        ) : (
+          <ol className="mt-2 flex flex-col gap-1 text-xs">
+            {HOLD_STAGES.map((stage, index) => {
+              const done = index < currentIndex;
+              const active = index === currentIndex;
+              return (
+                <li aria-current={active ? "step" : undefined} className={cn("flex items-center gap-1.5", !active && !done && "text-muted-foreground")} key={stage.id}>
+                  <span aria-hidden className="flex size-3.5 shrink-0 items-center justify-center">
+                    {done ? <CheckIcon className="size-3.5" /> : active ? <LoaderCircleIcon className="size-3.5 animate-spin motion-reduce:animate-none" /> : <span className="size-1 rounded-full bg-current" />}
+                  </span>
+                  <span className="min-w-0">{stage.label}</span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span>Waiting <HoldElapsed startedAtMs={hold.startedAtMs} /> · video held at its first frame</span>
+          <Button onClick={onStart} size="sm" type="button" variant={problem ? "default" : "outline"}>Start video now</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const captionSizeClasses: Record<CaptionSize, string> = {
   compact: "text-[12px]",
   normal: "text-[14px]",
@@ -248,6 +306,9 @@ export function CameraWorkspace({
   sessionNotice,
   sessionBadge,
   sessionStartedAtMonotonicMs = null,
+  playbackHold = null,
+  onStartHeldPlayback,
+  stepBadge = null,
   onFullscreenLayoutLock,
   stageClassName,
   controlBar,
@@ -266,7 +327,8 @@ export function CameraWorkspace({
   const fullscreenControllerRef = useRef<ReturnType<typeof createStageFullscreen> | null>(null);
   const [fullscreen, setFullscreen] = useState<StageFullscreenState>({ mode: "inline", notice: null });
   const sessionStatus = videoSessionView(sessionLive, fatalError);
-  const guidanceDisplay = sessionStatus.error || !sessionLive || cameraView !== 'live' ? null : inputCaption ?? guidanceView(guidance, sessionLive, cameraView);
+  // The hold card already shows delivery progress; a caption would sit on top of it.
+  const guidanceDisplay = playbackHold || sessionStatus.error || !sessionLive || cameraView !== 'live' ? null : inputCaption ?? guidanceView(guidance, sessionLive, cameraView);
   const enlarged = fullscreen.mode !== "inline";
   const fullscreenLabel = fullscreen.mode === "expanded" ? "Close expanded video view" : enlarged ? "Exit video fullscreen" : "Enter video fullscreen";
 
@@ -359,6 +421,11 @@ export function CameraWorkspace({
               </> : null}
             </div>
           ) : null}
+          {stepBadge ? (
+            <div className="pointer-events-none absolute top-10 left-3 z-30 max-w-[calc(100%-4.5rem)] truncate rounded-full border border-white/20 bg-black/50 px-2 py-1 text-[10px] leading-3 font-medium text-white" data-slot="video-step-badge">
+              {stepBadge}
+            </div>
+          ) : null}
           <Button
             aria-label={fullscreenLabel}
             aria-pressed={enlarged}
@@ -425,7 +492,8 @@ export function CameraWorkspace({
               </div>
             </div>
           ) : null}
-          {fileActive && cameraView === "live" ? (
+          {playbackHold ? <PlaybackHoldOverlay hold={playbackHold} onStart={onStartHeldPlayback} /> : null}
+          {fileActive && cameraView === "live" && !playbackHold ? (
             <VideoPlaybackControls key={videoFileUrl} videoRef={localVideoRef} />
           ) : null}
         </div>

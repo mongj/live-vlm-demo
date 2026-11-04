@@ -11,7 +11,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { PlaygroundState } from "@/hooks/use-playground";
 import { cn } from "@/lib/utils";
-import { PanelLeftIcon } from "lucide-react";
+import { ListChecksIcon, PanelLeftIcon } from "lucide-react";
 
 type ModelSidebarProps = {
   playground: PlaygroundState;
@@ -46,6 +46,25 @@ export function ModelSidebar({ playground, collapsed, onToggleCollapsed }: Model
         </div>
         <div className={cn(collapsed && "hidden")}><ThemeToggle /></div>
       </div>
+      {collapsed ? (
+        <div className="flex justify-center px-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={`Open settings for Procedure Mode (${playground.procedure.enabled ? "on" : "off"})`}
+                className={cn(playground.procedure.enabled && "text-primary")}
+                onClick={onToggleCollapsed}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <ListChecksIcon aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Procedure Mode · {playground.procedure.enabled ? "on" : "off"}</TooltipContent>
+          </Tooltip>
+        </div>
+      ) : null}
       <div
         className={cn("flex min-h-0 flex-1 flex-col", collapsed && "hidden")}
         id="playground-sidebar-content"

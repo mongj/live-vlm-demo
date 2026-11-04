@@ -4,6 +4,7 @@
  * output:{text_chunks:number,audio_chunks:number,audio_ms:number},
  * speech:{transcription:boolean,typed_input:boolean,asr_ms?:number,tts_ms?:number},
  * metrics?:Record<string,number>,chunk_index?:number,
+ * units?:{speak:number,listen:number,overruns:number,last_compute_ms?:number,max_compute_ms?:number},
  * native?:{kind:string,matched:boolean,listen_events:number,listen_streak:number,since_content_ms?:number,
  * input_sequence?:number,input_age_ms?:number,input_frames?:number,input_audio_ms?:number,force_listen?:boolean,force_source?:string}}} RuntimeDiagnostic
  * @typedef {{receivedAt:number,snapshot:RuntimeDiagnostic}} RuntimeDiagnosticEntry
@@ -57,6 +58,13 @@ export function parseRuntimeDiagnostic(value) {
       Object.assign(result.native,{matched:true,input_sequence:native.input_sequence,input_age_ms:native.input_age_ms,
         input_frames:native.input_frames,input_audio_ms:native.input_audio_ms,force_listen:native.force_listen,force_source:native.force_source});
     }
+  }
+  // Cumulative native counts: unlike the sampled fields, these cover every unit.
+  const units = value.units;
+  if (record(units) && count(units.speak) && count(units.listen) && count(units.overruns)) {
+    result.units = {speak:units.speak,listen:units.listen,overruns:units.overruns};
+    if (number(units.last_compute_ms)) result.units.last_compute_ms = units.last_compute_ms;
+    if (number(units.max_compute_ms)) result.units.max_compute_ms = units.max_compute_ms;
   }
   if (record(value.metrics)) {
     const metrics = Object.fromEntries(METRICS.flatMap(key => number(value.metrics[key]) ? [[key,value.metrics[key]]] : []));

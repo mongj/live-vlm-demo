@@ -5,7 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { DebugRawEntry, PlaygroundState } from "@/hooks/use-playground";
+import type { DebugRawEntry, PlaygroundState, PredictionFilter, SessionRunView } from "@/hooks/use-playground";
+import { CHECK_IN_SKIP_LABELS, debugTiles, formatSeconds, TURN_KIND_LABELS } from "@/lib/debug-metrics.mjs";
 import type { PlaybackDiagnostics } from "@/lib/playback-diagnostics.mjs";
 import type { RuntimeDiagnosticEntry } from "@/lib/runtime-diagnostics.mjs";
 import type { FrameRateSnapshot } from "@/lib/frame-rates";
@@ -18,6 +19,11 @@ type DebugPanelProps = {
   playback: PlaybackDiagnostics;
   diagnostics: RuntimeDiagnosticEntry[];
   active: boolean;
+  modelLabel?: string;
+  run?: SessionRunView | null;
+  onDownloadPredictions?: (filter: PredictionFilter) => void;
+  onDownloadSavedPredictions?: (startedAt: number, filter: PredictionFilter) => void;
+  predictionDownloadStatus?: string;
   frameRates: FrameRateSnapshot;
   targetFps: number;
   sessionLogSummary: PlaygroundState["sessionLogSummary"];
@@ -84,11 +90,93 @@ function eventCategory(event: string): DebugCategory {
   }
 }
 
+const TILE_TONES = {
+  ok: "bg-debug-output",
+  warn: "bg-debug-warning",
+  bad: "bg-destructive",
+} as const;
+
+function AtAGlance({ latest, run }: { latest: RuntimeDiagnosticEntry["snapshot"] | undefined; run: SessionRunView | null | undefined }) {
+  // No model runs in Wizard of Oz, so its runtime readings would only ever be blank.
+  const tiles = debugTiles(latest, run && run.sentenceCount > 0 ? run : null).filter(tile => !run?.wizard || tile.key === "sentences");
+  return (
+    <section aria-label="Live measurements" className="border-b px-4 pb-3">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2.5">
+        {tiles.map(tile => (
+          <div className="min-w-0" key={tile.key}>
+            <dt className="truncate text-[10px] text-muted-foreground">{tile.label}</dt>
+            <dd className="text-sm leading-5 font-medium text-foreground tabular-nums">{tile.value}</dd>
+            {tile.meter !== undefined && tile.tone ? (
+              <div aria-hidden className="mt-0.5 h-1 overflow-hidden rounded-full bg-muted">
+                <div className={cn("h-full rounded-full", TILE_TONES[tile.tone])} style={{width:`${tile.meter * 100}%`}} />
+              </div>
+            ) : null}
+            {tile.detail ? <dd className={cn("mt-0.5 text-[10px] leading-3 text-muted-foreground", tile.tone === "bad" && "font-medium text-destructive")}>{tile.detail}</dd> : null}
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+function TurnTable({ turns, total }: { turns: SessionRunView["turns"]; total: number }) {
+  if (!turns.length) return null;
+  return (
+    <section aria-label="Turn timing" className="border-b px-4 pb-3 text-xs">
+      <p className="py-1 font-medium">Turn timing · latest {turns.length} of {total}</p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-52 border-collapse text-[11px] text-muted-foreground tabular-nums">
+          <thead>
+            <tr className="text-left text-[10px]">
+              <th className="py-0.5 pr-2 font-normal" scope="col">Turn</th>
+              <th className="py-0.5 pr-2 text-right font-normal" scope="col" title="Queued in the browser until the gateway reported it sent">Delivery</th>
+              <th className="py-0.5 pr-2 text-right font-normal" scope="col" title="Sent until the first text arrived">First text</th>
+              <th className="py-0.5 text-right font-normal" scope="col" title="First text until the reply ended">Reply</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...turns].reverse().map(turn => (
+              <tr className="border-t border-border/60" key={turn.index}>
+                <th className="py-0.5 pr-2 text-left font-normal text-foreground" scope="row">
+                  {TURN_KIND_LABELS[turn.kind] ?? turn.kind}
+                  {turn.status !== "complete" && turn.status !== "open" ? <span className="text-muted-foreground"> · {turn.status.replace("_", " ")}</span> : null}
+                </th>
+                <td className="py-0.5 pr-2 text-right">{formatSeconds(turn.deliveryMs)}</td>
+                <td className="py-0.5 pr-2 text-right">{formatSeconds(turn.firstTextMs)}</td>
+                <td className="py-0.5 text-right">{formatSeconds(turn.replyMs)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ProcedureSummary({ run }: { run: SessionRunView }) {
+  const lastMove = run.transitions.at(-1);
+  const spokenMs = run.withheld.spokenMs;
+  return (
+    <section aria-label="Procedure summary" className="space-y-1 border-b px-4 pb-3 text-xs text-muted-foreground">
+      {run.trackerEnabled ? (
+        <>
+          <p>Step estimate: {run.currentStep >= 0 ? `${run.currentStep + 1} of ${run.steps.length}` : "None yet"} · {run.transitions.length} moves{lastMove ? ` · last belief ${(lastMove.belief * 100).toFixed(0)}%` : ""}</p>
+          <p>At a new step: {run.announcedCount} of {run.sentenceCount} sentences</p>
+          <p>Withheld by the new-step filter: {(run.withheld.audioMs / 1000).toFixed(1)} s of {(spokenMs / 1000).toFixed(1)} s speech · {run.withheld.replies} replies</p>
+        </>
+      ) : <p>Step tracker off</p>}
+      {run.checkIns.enabled ? (
+        <p>Check-ins every {run.checkIns.intervalS} s: {run.checkIns.sent} sent · {run.checkIns.failed} failed · {run.checkIns.skipped} skipped{run.checkIns.lastReason ? ` · last skip: ${CHECK_IN_SKIP_LABELS[run.checkIns.lastReason] ?? run.checkIns.lastReason}` : ""}</p>
+      ) : <p>Check-ins off</p>}
+    </section>
+  );
+}
+
 function DebugActionHint({label,children}:{label:string;children:ReactNode}) {
   return <Tooltip><TooltipTrigger asChild><span className="inline-flex">{children}</span></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>;
 }
 
-export function DebugPanel({ entries, playback, diagnostics, active, frameRates, targetFps, sessionLogSummary, savedSessionLogs, savedLogDownloadStatus, includeTranscript, transcriptChoiceLocked, onIncludeTranscript, onDownloadSavedLog, onClearSavedLogs, onMarkIssue, onMarkStateChange, stateChangeShortcutHeld, onDownloadLog, onBack }: DebugPanelProps) {
+export function DebugPanel({ entries, playback, diagnostics, active, modelLabel, run, onDownloadPredictions, onDownloadSavedPredictions, predictionDownloadStatus, frameRates, targetFps, sessionLogSummary, savedSessionLogs, savedLogDownloadStatus, includeTranscript, transcriptChoiceLocked, onIncludeTranscript, onDownloadSavedLog, onClearSavedLogs, onMarkIssue, onMarkStateChange, stateChangeShortcutHeld, onDownloadLog, onBack }: DebugPanelProps) {
   const [filter, setFilter] = useState<DebugFilter>("all");
   const [issueKeyHeld, setIssueKeyHeld] = useState(false);
   const [issuePointerHeld, setIssuePointerHeld] = useState(false);
@@ -124,7 +212,7 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
       <p>Configured browser target: {targetFps} FPS</p>
       <p>Browser captured: {frameRates.captured?.toFixed(1) ?? 'Unavailable'} FPS</p>
       <p>Browser submitted: {frameRates.submitted?.toFixed(1) ?? 'Unavailable'} FPS</p>
-      <p>Upstream MiniCPM sent: {frameRates.upstream?.toFixed(1) ?? 'Unavailable'} FPS</p>
+      <p>Sent upstream to the model: {frameRates.upstream?.toFixed(1) ?? 'Unavailable'} FPS</p>
     </section>
   );
   return (
@@ -193,6 +281,21 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
         {sessionLogSummary?.terminal ? <p className="w-full text-xs text-muted-foreground">{downloadHint}</p> : null}
       </div>
       <ScrollArea className="min-h-0 flex-1">
+        {run?.wizard ? <p className="mx-4 mb-2 rounded-md border border-debug-warning/25 bg-debug-warning/10 px-2 py-1 text-xs" role="note">Wizard of Oz: a person typed these replies. Nothing here measures a model.</p> : null}
+        {latest || run ? <AtAGlance latest={latest} run={run} /> : null}
+        {run ? <TurnTable total={run.turnCount} turns={run.turns} /> : null}
+        {run?.procedureEnabled ? <ProcedureSummary run={run} /> : null}
+        {run?.videoId ? (
+          <section aria-label="Predictions export" className="space-y-1.5 border-b px-4 pb-3 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">Predictions · SPOT-Bench format</p>
+            <p className="break-words">{run.sentenceCount} {run.sentenceCount === 1 ? "sentence" : "sentences"} from {run.videoId}. {run.wizard ? "Values are the operator's words, so do not score them as model output." : "Values are the model's own words."} Clip time comes from the video.</p>
+            <div className="flex flex-wrap gap-1.5">
+              <Button onClick={() => onDownloadPredictions?.("all")} size="sm" type="button" variant="outline">All replies</Button>
+              <Button disabled={!run.trackerEnabled} onClick={() => onDownloadPredictions?.("announced")} size="sm" type="button" variant="outline">New steps only</Button>
+            </div>
+            {predictionDownloadStatus ? <p className="break-words" role="status">{predictionDownloadStatus}</p> : null}
+          </section>
+        ) : null}
         {savedSessionLogs ? (
           <section aria-label="Saved session logs" className="border-b px-4 pb-3 text-xs text-muted-foreground">
             <details>
@@ -217,6 +320,9 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
                     <p>{log.events.length} events · {log.issueCount} issues · {log.stateChangeCount} changes{log.transcriptEnabled ? " · transcript included" : " · no transcript"}{log.truncated || log.transcript?.truncated ? " · truncated" : ""}</p>
                   </div>
                   <Button aria-label={`Download session log from ${new Date(log.startedAt).toLocaleString()}`} onClick={()=>onDownloadSavedLog?.(log.startedAt)} size="sm" type="button" variant="outline">Download</Button>
+                  {log.run?.videoId ? (
+                    <Button aria-label={`Download predictions from ${new Date(log.startedAt).toLocaleString()}`} onClick={()=>onDownloadSavedPredictions?.(log.startedAt,"all")} size="sm" type="button" variant="outline">Predictions</Button>
+                  ) : null}
                 </div>
               ))}
               <Button onClick={onClearSavedLogs} disabled={savedSessionLogs.storage === "loading"} size="sm" type="button" variant="outline" className="mt-1">Clear saved logs</Button>
@@ -237,7 +343,7 @@ export function DebugPanel({ entries, playback, diagnostics, active, frameRates,
         ) : null}
         {latest ? (
           <section aria-label="MiniCPM runtime diagnostics" className="space-y-2 border-b px-4 pb-3 text-xs text-muted-foreground">
-            <p className="font-medium text-foreground">MiniCPM · {active ? 'latest report' : 'last session'}</p>
+            <p className="font-medium text-foreground">{modelLabel ?? "Model"} · {active ? 'latest report' : 'last session'}</p>
             <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1">
               <dt>Reported state</dt><dd>{latest.stage}</dd>
               <dt>Session elapsed</dt><dd>{(latest.elapsed_ms / 1000).toFixed(1)} s</dd>
