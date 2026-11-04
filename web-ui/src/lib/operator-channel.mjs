@@ -46,7 +46,7 @@ export function createOperatorHost({channel, hostId, now, onSend, onVoice}) {
     if (data.kind === "operator-beat") {
       if (data.hostId === hostId) seenAt = now();
     } else if (data.kind === "operator-bye") {
-      seenAt = null;
+      if (data.hostId === hostId) seenAt = null;
     } else if (data.hostId === hostId && data.kind === "operator-send" && typeof data.id === "string" && typeof data.text === "string") {
       const ok = data.text.length <= OPERATOR_MAX_CHARS && onSend(data.text) === true;
       channel.postMessage({kind:"host-result", hostId, id:data.id, ok});
@@ -134,7 +134,7 @@ export function createOperatorClient({channel, now, onChange, onResult}) {
     },
     view: () => ({state:host && fresh() ? host.state : null, frame:host && fresh() ? frame : null}),
     close() {
-      channel.postMessage({kind:"operator-bye"});
+      channel.postMessage({kind:"operator-bye", hostId:host?.id ?? null});
       channel.onmessage = null;
     },
   };

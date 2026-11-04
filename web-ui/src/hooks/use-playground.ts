@@ -1317,13 +1317,19 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
           // Supplied text, not the model's: kept apart from reply text, captions and predictions.
           for (const row of replyStep.listSays) recordEvidence("step_list_say",{toStep:row.step+1,clipS:row.clipS});
           setMessages(current=>[...current,...replyStep.listSays.map(row=>({id:crypto.randomUUID(),role:"assistant" as const,origin:"step_list" as const,text:row.value,streaming:false}))]);
-          operatorVoiceRef.current.speak(replyStep.listSays.map(row=>row.value).join(" "));
         }
         const stepFields={...(replyStep?.announcedStep === null || replyStep?.announcedStep === undefined ? {} : {announced:true,trackerStep:replyStep.announcedStep}),
           ...(run?.wizard ? {operator:true} : {})};
+        let replySpoken=false;
         if (run?.wizard && replyIsCurrent && presentable) {
           const speakGated=run.tracker !== null && procedureRef.current.speakOnlyNewSteps;
-          if (!speakGated || (replyStep?.announcedStep ?? null) !== null) operatorVoiceRef.current.speak(chunk);
+          if (!speakGated || (replyStep?.announcedStep ?? null) !== null) { operatorVoiceRef.current.speak(chunk); replySpoken=true; }
+        }
+        if (replyStep?.listSays.length) {
+          const listText=replyStep.listSays.map(row=>row.value).join(" ");
+          // After the reply it belongs to, so neither cuts off the other.
+          if (replySpoken) operatorVoiceRef.current.speakNext(listText);
+          else operatorVoiceRef.current.speak(listText);
         }
         if ((message.audio || presentable) && !message.final) {
           assistantTurnOpenRef.current = true;
@@ -1518,6 +1524,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   }
 
   async function enableCamera(deviceId: string) {
+    dropClipAnnotation();
     invalidateSourceSession();
     const requestId = cameraRequestIdRef.current + 1;
     cameraRequestIdRef.current = requestId;
@@ -1668,14 +1675,21 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     return filled !== null && filled.task === procedureRef.current.task && filled.stepsText === procedureRef.current.stepsText;
   }
 
+  /** Also makes any request still pending for the old clip ignore its answer. */
+  function dropClipAnnotation() {
+    annotationClipRef.current=null;
+    if (phaseRef.current === "idle" && procedureHoldsAnnotations()) setProcedure({task:"",stepsText:""});
+    annotationFilledRef.current=null;
+    setClipAnnotationState(null);
+  }
+
   /** Reselecting the same clip keeps any edits. Annotated steps never outlive their clip. */
   async function loadClipAnnotation(video: VideoRecord) {
     const clipKey=video.origin ? `${video.origin.sourceId}:${video.origin.name}` : `local:${video.id}`;
     if (annotationClipRef.current === clipKey) return;
+    dropClipAnnotation();
     annotationClipRef.current=clipKey;
-    if (phaseRef.current === "idle" && procedureHoldsAnnotations()) setProcedure({task:"",stepsText:""});
-    annotationFilledRef.current=null;
-    if (video.origin?.sourceId !== "spot-bench") { setClipAnnotationState(null); return; }
+    if (video.origin?.sourceId !== "spot-bench") return;
     setClipAnnotationState({status:"loading",clipKey});
     try {
       const annotation=await fetchClipAnnotation(video.origin.sourceId,video.origin.name);

@@ -8,6 +8,15 @@ export function createOperatorVoice(getSynth = () => globalThis.speechSynthesis,
   let muted = false;
   let volume = 1;
   const stop = () => getSynth()?.cancel();
+  /** @param {string} text */
+  const say = text => {
+    const synth = getSynth();
+    const Speech = Utterance ?? globalThis.SpeechSynthesisUtterance;
+    if (!enabled || muted || volume === 0 || !synth || !Speech) return;
+    const utterance = new Speech(text);
+    utterance.volume = volume;
+    synth.speak(utterance);
+  };
 
   return {
     stop,
@@ -17,13 +26,12 @@ export function createOperatorVoice(getSynth = () => globalThis.speechSynthesis,
      */
     speak(text) {
       stop();
-      const synth = getSynth();
-      const Speech = Utterance ?? globalThis.SpeechSynthesisUtterance;
-      if (!enabled || muted || volume === 0 || !synth || !Speech) return;
-      const utterance = new Speech(text);
-      utterance.volume = volume;
-      synth.speak(utterance);
+      say(text);
     },
+    /** Follows what is being said, for text that belongs with it.
+     * @param {string} text
+     */
+    speakNext: say,
     /** @param {boolean} next */
     setEnabled(next) {
       enabled = next;
