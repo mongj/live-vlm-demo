@@ -100,7 +100,7 @@ const nativeNumbers=new Set(["native_input_sequence","native_input_age_ms","nati
 const captionCounters=new Set(["caption_unit","captionPage","captionOrder","leadingWhitespace","trailingWhitespace"]);
 const markerNumbers=new Set(["markerIndex","frameSequence","latestFrameSequence","latestFrameAt","latestFrameElapsedMs","frameAgeMs"]);
 type EvidenceRow = {event:EvidenceEvent; at:number; elapsedMs:number; [key:string]:unknown};
-const generationBounds:Record<string,readonly [number,number]> = {temperature:[0.1,2],topP:[0.05,1],topK:[0,200],lengthPenalty:[0.5,2]};
+const generationBounds:Record<string,readonly [number,number]> = {temperature:[0.1,2],topP:[0.05,1],topK:[0,200],lengthPenalty:[0.5,2],listenProbScale:[0.5,1.5]};
 const playbackStrings:Record<string,ReadonlySet<string>> = {
   state:new Set(["scheduled","ended","cancelled","context_state","resume_failed","output_settings","output_device_changed","output_device_failed"]),
   audioContextState:new Set(["running","suspended","closed","interrupted","unknown"]),

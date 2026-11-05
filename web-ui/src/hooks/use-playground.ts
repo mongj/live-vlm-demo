@@ -196,6 +196,7 @@ export type PlaygroundState = {
 };
 
 const SESSION_END_ACK_TIMEOUT_MS = 8_000;
+const REPLY_OVERDUE_MS = 6_000;
 const WIZARD_MODEL_ID = "wizard-of-oz";
 
 type SessionEndWaiter = {
@@ -286,6 +287,14 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const [sessionLogSummary, setSessionLogSummary] = useState<SessionLogSummary | null>(null);
   const [sessionConnection, setSessionConnection] = useState<SessionConnection>("none");
   const [sessionActivity, setSessionActivity] = useState<SessionActivity>("idle");
+  // Each heard request restarts the wait, and a reply or stop clears it.
+  const [lastHeardAt, setLastHeardAt] = useState(0);
+  const [replyOverdue, setReplyOverdue] = useState(false);
+  useEffect(()=>{
+    if (sessionActivity !== "waiting") return;
+    const timer=setTimeout(()=>setReplyOverdue(true),REPLY_OVERDUE_MS);
+    return ()=>{ clearTimeout(timer); setReplyOverdue(false); };
+  },[sessionActivity,lastHeardAt]);
   const [stateChangeShortcutHeld, setStateChangeShortcutHeld] = useState(false);
   const markStateChangeRef = useRef<(source:"button"|"keyboard")=>void>(()=>{});
   markStateChangeRef.current = (source) => {
@@ -463,6 +472,8 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     if (!log) return;
     recordCaptionClear("session_ended");
     pcmPlayerRef.current?.stop("closed");
+    runRef.current?.endSession(Date.now());
+    publishRun();
     log.finish(reason);
     archiveCompletedEvidence(log);
     setSessionLogSummary(log.summary());
@@ -1169,7 +1180,10 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
           }
         } else {
           recordEvidence("input_status",{source:"voice",inputId:message.utterance_id,state:"transcribing",final:message.final,revision:message.revision,turnOrder:message.turn_order,generation:message.generation,accepted:eligible,...inputOrdering,hasText:!!message.text.trim(),textChars:message.text.length});
-          if ((eligible || (instructionAccepted && message.turn_order > lastReplyOrderRef.current)) && message.final && message.text.trim()) setSessionActivity(current=>current === "responding" ? current : "waiting");
+          if ((eligible || (instructionAccepted && message.turn_order > lastReplyOrderRef.current)) && message.final && message.text.trim()) {
+            setSessionActivity(current=>current === "responding" ? current : "waiting");
+            setLastHeardAt(Date.now());
+          }
           // ASR is a fallback, not a second interruption for the same question.
           // MiniCPM/JoyAI turn orders distinguish a new instruction from a late
           // transcription revision belonging to the answer already playing.
@@ -2233,7 +2247,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const sessionActive = phase !== "idle";
   const procedureErrors = useMemo(() => validateProcedure(procedure), [procedure]);
   const procedureValid = Object.keys(procedureErrors).length === 0;
-  const sessionStatusView = describeSessionStatusView({phase,connection:sessionConnection,activity:sessionActivity,mode:audio.mode,holding:audio.holding,listening:audio.listening,pending:audio.pending,micError:Boolean(audio.error),speaking:microphoneSpeechActive,watching:(frameRates.submitted ?? 0) > 0});
+  const sessionStatusView = describeSessionStatusView({phase,connection:sessionConnection,activity:sessionActivity,mode:audio.mode,holding:audio.holding,listening:audio.listening,pending:audio.pending,micError:Boolean(audio.error),speaking:microphoneSpeechActive,watching:(frameRates.submitted ?? 0) > 0,replyOverdue});
 
   return {
     catalogStatus,

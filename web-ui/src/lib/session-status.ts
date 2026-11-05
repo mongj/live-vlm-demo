@@ -7,7 +7,7 @@ export type SessionStatusBadge = {
   label: string;
   tone: "idle"|"listening"|"watching"|"preparing"|"sending"|"waiting"|"responding"|"error";
 };
-type SessionStatusState = {phase:string;connection:SessionConnection;activity:SessionActivity;mode:string;holding:boolean;listening:boolean;pending:boolean;micError:boolean;speaking?:boolean;watching?:boolean};
+type SessionStatusState = {phase:string;connection:SessionConnection;activity:SessionActivity;mode:string;holding:boolean;listening:boolean;pending:boolean;micError:boolean;speaking?:boolean;watching?:boolean;replyOverdue?:boolean};
 export function canUpdateSessionActivity(feedback:InputFeedback,event:InputTranscriptionMessage|InputStatusMessage):boolean {
   if (event.session_id !== feedback.sessionId) return false;
   if (event.source === "voice" && event.generation !== feedback.generation) return false;
@@ -33,7 +33,9 @@ export function describeSessionStatusView(state:SessionStatusState):SessionStatu
   if (state.activity === "preparing") return {label:"Preparing",tone:"preparing",detail:"Preparing instruction"};
   if (state.activity === "sending") return {label:"Sending",tone:"sending",detail:"Sending instruction"};
   if (state.activity === "responding") return {label:"Responding",tone:"responding",detail:"Responding"};
-  if (state.activity === "waiting") return {label:"Waiting",tone:"waiting",detail:"Waiting for response"};
+  if (state.activity === "waiting") return state.replyOverdue
+    ? {label:"No reply yet",tone:"waiting",detail:"Speech sent · the model has not replied yet"}
+    : {label:"Waiting",tone:"waiting",detail:"Waiting for response"};
   if (state.micError) return {label:"Mic unavailable",tone:"error",detail:"Model session ready · microphone unavailable"};
   if (state.watching) return {label:"Watching",tone:"watching",detail:"Model session ready · watching video"};
   if (state.listening) return {label:"Listening",tone:"listening",detail:"Model session ready · listening"};

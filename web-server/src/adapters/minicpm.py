@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +34,22 @@ JITTER_BUFFER_BYTES = INPUT_BYTES * 2
 SEND_INTERVAL_SECONDS = 1.0
 REPLY_QUEUE_SIZE = 64
 logger = logging.getLogger(__name__)
+# The model can end a unit inside a word and open the next with a spaced token (" cabinet" + " s", " ti" + " ger").
+# A one or two letter piece outside this list is taken as part of a word. Longer pieces cannot be told from words.
+SHORT_WORDS = frozenset(
+    "a i ad ah al am an as at ax be by cm do eh ex go ha he hi hm id if in is it kg lb me ml mm my no of oh ok on or "
+    "ow ox oz pm so to uh um up us vs we ya yo".split())
+_PIECE_AT_END = re.compile(r"[^A-Za-z'’]([a-z]{1,2})$")
+_PIECE_AT_START = re.compile(r"\s*([a-z]{1,2})(?![A-Za-z'’])")
+_LOWER_START = re.compile(r"\s*[a-z]")
+
+
+def _splits_word(previous: str, text: str) -> bool:
+    """True when the join between two units falls inside one word."""
+    if not previous[-1].isascii() or not previous[-1].isalpha() or not _LOWER_START.match(text):
+        return False
+    end, start = _PIECE_AT_END.search(previous), _PIECE_AT_START.match(text)
+    return bool((end and end[1] not in SHORT_WORDS) or (start and start[1] not in SHORT_WORDS))
 
 
 class MiniCPMConfig(BaseModel):
@@ -78,6 +95,11 @@ class MiniCPMConfig(BaseModel):
         default=1.1, strict=True, allow_inf_nan=False, ge=0.5, le=2.0,
         title="Turn-length bias",
         description="Above 1 encourages longer turns; below 1 encourages earlier endings. This is not a maximum token count.",
+    )
+    listen_prob_scale: float = Field(
+        default=1.0, strict=True, allow_inf_nan=False, ge=0.5, le=1.5,
+        title="Listen bias",
+        description="Scales the model's score for staying silent each second. Below 1 makes it more willing to speak, and it may talk more. 1 is the native setting.",
     )
 
 
@@ -283,14 +305,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                 payload: dict[str, Any] = {"system_prompt": "\n\n".join(
                     part for part in (task_prompt, english_policy, response_policy, time_context, reference_policy) if part
                 )}
-                # Native reuses its view config: send defaults too, on every session.
-                payload["config"] = {
-                    "decode_mode": self.config.decode_mode,
-                    "temperature": self.config.temperature,
-                    "top_p": self.config.top_p,
-                    "top_k": self.config.top_k,
-                    "length_penalty": self.config.length_penalty,
-                }
+                payload["config"] = self._session_config()
                 await ws.send(json.dumps({"type": "session.init", "payload": payload}))
                 continue
             if kind == "session.created" and queued:
@@ -301,6 +316,19 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                 raise _failure(event)
             raise SessionError(f"MiniCPM unexpected startup event: {kind}", fatal=True)
         raise SessionError("MiniCPM disconnected during startup", fatal=True)
+
+    def _session_config(self) -> dict[str, Any]:
+        """Native reuses its view config: send defaults too, on every session. Listen bias goes only when changed."""
+        config: dict[str, Any] = {
+            "decode_mode": self.config.decode_mode,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "top_k": self.config.top_k,
+            "length_penalty": self.config.length_penalty,
+        }
+        if self.config.listen_prob_scale != 1.0:
+            config["listen_prob_scale"] = self.config.listen_prob_scale
+        return config
 
     def offer_text(self, text: str) -> None:
         if text.strip():
@@ -540,14 +568,17 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
 
     def _respace(self, text: str) -> str:
         """Saved runs are all spaced or all unspaced at unit joins, and the session's first text shows which.
-        Restore the space in an unspaced session. `raw` keeps the runtime's text. A word split across units is wrongly spaced."""
+        Restore the space in an unspaced session and drop it inside a split word. `raw` keeps the runtime's text."""
         if self._no_lead_session is None:
             self._no_lead_session = not text[0].isspace()
-        previous, self._text_tail = self._text_tail, text[-1]
-        if (self._no_lead_session and previous and previous.isascii() and not previous.isspace()
+        previous, respaced = self._text_tail, text
+        if previous and _splits_word(previous, text):
+            respaced = text.lstrip()
+        elif (self._no_lead_session and previous and previous[-1].isascii() and not previous[-1].isspace()
                 and text[0].isascii() and text[0].isalnum()):
-            return " " + text
-        return text
+            respaced = " " + text
+        self._text_tail = respaced
+        return respaced
 
     def _delta_reply(self, event: dict[str, Any]) -> Reply | None:
         kind = event.get("kind")

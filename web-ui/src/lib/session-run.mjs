@@ -11,6 +11,8 @@ const MAX_SENTENCES = 4000;
 const MAX_SENTENCE_CHARS = 1000;
 const MAX_CHECK_INS = 2000;
 const REPLY_WINDOW_MS = 30_000;
+/** Speech that resumes this soon, with no reply between, belongs to the same voice turn. */
+const VOICE_TURN_GAP_MS = 2_000;
 const MIN_RATE_WINDOW_S = 10;
 /** Bounded so a check-in never stacks on the next one or lands long after its slot. */
 const MAX_DEFER_FRACTION = 0.5;
@@ -250,13 +252,32 @@ export function createSessionRun({procedure = null, videoId = null, startedAtMs,
     },
     /** @param {number} wallMs */
     voiceStart(wallMs) {
+      const last = openInputs.at(-1);
+      if (last?.kind === "voice" && last.sentAtMs !== undefined && wallMs - last.sentAtMs <= VOICE_TURN_GAP_MS) {
+        voiceRow = last;
+        return;
+      }
       voiceRow = addTurn("voice", {queuedAtMs:wallMs});
       openInputs.push(voiceRow);
     },
     /** @param {number} wallMs */
     voiceEnd(wallMs) {
-      if (voiceRow) voiceRow.sentAtMs ??= wallMs;
+      // A row already answered keeps the time its reply was measured from.
+      if (voiceRow && openInputs.includes(voiceRow)) voiceRow.sentAtMs = wallMs;
       voiceRow = null;
+    },
+    /** Closes what is still open when the session stops, so the saved log has no open turns.
+     * @param {number} wallMs
+     */
+    endSession(wallMs) {
+      voiceRow = null;
+      for (const row of openInputs.splice(0)) {
+        closeTurn(row, row.kind !== "voice" && row.sentAtMs === undefined ? "cancelled" : "no_reply");
+      }
+      if (openReply) {
+        closeTurn(openReply, "interrupted", wallMs);
+        openReply = null;
+      }
     },
     /** @param {{computeMs?:number,inputAgeMs?:number}} values */
     noteRuntime(values) {
