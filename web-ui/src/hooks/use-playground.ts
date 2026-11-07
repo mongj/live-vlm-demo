@@ -290,6 +290,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   // Each heard request restarts the wait, and a reply or stop clears it.
   const [lastHeardAt, setLastHeardAt] = useState(0);
   const [replyOverdue, setReplyOverdue] = useState(false);
+  const [voiceHeld, setVoiceHeld] = useState(false);
   useEffect(()=>{
     if (sessionActivity !== "waiting") return;
     const timer=setTimeout(()=>setReplyOverdue(true),REPLY_OVERDUE_MS);
@@ -479,6 +480,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
     setSessionLogSummary(log.summary());
     setSessionConnection(current=>current === "failed" ? current : "closed");
     setSessionActivity("idle");
+    setVoiceHeld(false);
   }
 
   const [catalogStatus, setCatalogStatus] = useState<"loading" | "ready" | "error">(
@@ -1218,6 +1220,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
         if (message.diagnostic) {
           const diagnostic=message.diagnostic;
           const native=diagnostic.native;
+          if (native) setVoiceHeld(native.force_source === "stop");
           recordEvidence("diagnostic",{state:diagnostic.event,stage:diagnostic.stage,elapsed_ms:diagnostic.elapsed_ms,chunk_index:diagnostic.chunk_index,...diagnostic.input,...diagnostic.output,inputAudioMs:diagnostic.input.audio_ms,outputAudioMs:diagnostic.output.audio_ms,...diagnostic.speech,...diagnostic.metrics,
             ...(native ? {native_kind:native.kind,native_matched:native.matched,native_input_sequence:native.input_sequence,
               native_input_age_ms:native.input_age_ms,native_input_frames:native.input_frames,native_input_audio_ms:native.input_audio_ms,
@@ -2247,7 +2250,7 @@ export function usePlayground(initialModels: CatalogModel[], initialCatalogError
   const sessionActive = phase !== "idle";
   const procedureErrors = useMemo(() => validateProcedure(procedure), [procedure]);
   const procedureValid = Object.keys(procedureErrors).length === 0;
-  const sessionStatusView = describeSessionStatusView({phase,connection:sessionConnection,activity:sessionActivity,mode:audio.mode,holding:audio.holding,listening:audio.listening,pending:audio.pending,micError:Boolean(audio.error),speaking:microphoneSpeechActive,watching:(frameRates.submitted ?? 0) > 0,replyOverdue});
+  const sessionStatusView = describeSessionStatusView({phase,connection:sessionConnection,activity:sessionActivity,mode:audio.mode,holding:audio.holding,listening:audio.listening,pending:audio.pending,micError:Boolean(audio.error),speaking:microphoneSpeechActive,watching:(frameRates.submitted ?? 0) > 0,replyOverdue,voiceHeld});
 
   return {
     catalogStatus,

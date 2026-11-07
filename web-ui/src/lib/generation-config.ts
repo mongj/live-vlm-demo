@@ -1,6 +1,6 @@
 import { defaultsFromSchema, resolveSchema, type JsonSchema } from "@/lib/json-schema";
 
-export const GENERATION_KEYS = ["decode_mode", "temperature", "top_p", "top_k", "length_penalty", "listen_prob_scale"] as const;
+export const GENERATION_KEYS = ["decode_mode", "temperature", "top_p", "top_k", "length_penalty", "request_listen_scale"] as const;
 export const SAMPLING_KEYS = ["temperature", "top_p", "top_k"] as const;
 
 /** Only group fields actually advertised by this gateway; older catalogs still work. */
@@ -43,7 +43,7 @@ export function generationConfigErrors(modelId: string, schema: JsonSchema, valu
 export function generationEvidence(modelId: string, schema: JsonSchema, values: Record<string, unknown>) {
   const { advanced } = splitGenerationSchema(modelId, schema);
   if (!advanced || Object.keys(generationConfigErrors(modelId, schema, values)).length) return null;
-  const names = { decode_mode: "decodeMode", temperature: "temperature", top_p: "topP", top_k: "topK", length_penalty: "lengthPenalty", listen_prob_scale: "listenProbScale" };
+  const names = { decode_mode: "decodeMode", temperature: "temperature", top_p: "topP", top_k: "topK", length_penalty: "lengthPenalty", request_listen_scale: "requestListenScale" };
   const snapshot: Record<string, unknown> = { source: "session_request" };
   for (const key of GENERATION_KEYS) {
     const field = advanced.properties?.[key];

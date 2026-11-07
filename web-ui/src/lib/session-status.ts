@@ -7,7 +7,7 @@ export type SessionStatusBadge = {
   label: string;
   tone: "idle"|"listening"|"watching"|"preparing"|"sending"|"waiting"|"responding"|"error";
 };
-type SessionStatusState = {phase:string;connection:SessionConnection;activity:SessionActivity;mode:string;holding:boolean;listening:boolean;pending:boolean;micError:boolean;speaking?:boolean;watching?:boolean;replyOverdue?:boolean};
+type SessionStatusState = {phase:string;connection:SessionConnection;activity:SessionActivity;mode:string;holding:boolean;listening:boolean;pending:boolean;micError:boolean;speaking?:boolean;watching?:boolean;replyOverdue?:boolean;voiceHeld?:boolean};
 export function canUpdateSessionActivity(feedback:InputFeedback,event:InputTranscriptionMessage|InputStatusMessage):boolean {
   if (event.session_id !== feedback.sessionId) return false;
   if (event.source === "voice" && event.generation !== feedback.generation) return false;
@@ -30,6 +30,7 @@ export function describeSessionStatusView(state:SessionStatusState):SessionStatu
     : {label:"Not started",tone:"idle",detail:"App loaded · model session not started"};
   if (state.pending) return {label:"Mic permission",tone:"waiting",detail:"Microphone permission pending"};
   if ((state.holding || state.speaking) && state.listening) return {label:"Listening",tone:"listening",detail:"Listening"};
+  if (state.voiceHeld) return {label:"Paused",tone:"idle",detail:"Stopped by voice · speak to continue"};
   if (state.activity === "preparing") return {label:"Preparing",tone:"preparing",detail:"Preparing instruction"};
   if (state.activity === "sending") return {label:"Sending",tone:"sending",detail:"Sending instruction"};
   if (state.activity === "responding") return {label:"Responding",tone:"responding",detail:"Responding"};

@@ -2,10 +2,97 @@
 from collections import deque
 from dataclasses import dataclass
 import math
+import re
 import struct
 from uuid import uuid4
 
 from ..types import SessionError
+
+_STOP_WORDS = frozenset("stop pause wait quiet silence enough hush".split())
+_STOP_PHRASES = ("hold on", "shut up")
+_STOP_EXTRAS = frozenset("a be counting hey hold it just minute moment no now ok okay on please right second shut talking that the up wrong you".split())
+
+
+def is_stop_request(text: str) -> bool:
+    """True only for short speech made entirely of stop words, so "wait, tell me the story" stays a request."""
+    words = re.findall(r"[a-z']+", text.lower())
+    if not 1 <= len(words) <= 8 or any(word not in _STOP_WORDS and word not in _STOP_EXTRAS for word in words):
+        return False
+    return any(word in _STOP_WORDS for word in words) or any(phrase in " ".join(words) for phrase in _STOP_PHRASES)
+
+
+_NUMBER_WORDS = frozenset("zero no one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                          "sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred".split())
+
+
+_NUMBER_PATTERN = re.compile("|".join(sorted(_NUMBER_WORDS, key=len, reverse=True)))
+
+
+def sentence_shape(sentence: str) -> str:
+    """A sentence's letters without numbers, spaces or s, so "Two fingers." and "One finger." match.
+
+    Some sessions lose the spaces between words, so this cannot rely on them.
+    """
+    return _NUMBER_PATTERN.sub("", re.sub(r"[^a-z]", "", sentence.lower())).replace("s", "")
+
+
+class ReplyController:
+    """Turn-taking rules applied through force_listen and the per-input listen scale.
+
+    Voice stop and the reply push act only on transcribed speech. The run-on guard reads the model's own text.
+    """
+
+    def __init__(self, *, voice_stop: bool, request_scale: float, request_window: float,
+                 runon_guard: bool = False, runon_quiet: float = 8.0):
+        self.voice_stop = voice_stop
+        self.request_scale = request_scale
+        self.request_window = request_window
+        self.runon_guard = runon_guard
+        self.runon_quiet = runon_quiet
+        self.held = False
+        self.request_until = float("-inf")
+        self.quiet_until = float("-inf")
+        self.reply_end_shape: str | None = None
+        self.partial = ""
+
+    def heard(self, text: str, final: bool, now: float) -> None:
+        if not text.strip():
+            return
+        if self.voice_stop and is_stop_request(text):
+            self.held = True
+            self.request_until = float("-inf")
+            return
+        if final:
+            self.held = False
+            self.quiet_until = float("-inf")
+        if not self.held:
+            self.request_until = now + self.request_window
+
+    def model_spoke(self) -> None:
+        self.request_until = float("-inf")
+
+    def model_said(self, text: str, now: float) -> None:
+        """Ends a turn that keeps repeating one sentence pattern, such as an endless count."""
+        self.model_spoke()
+        if not self.runon_guard:
+            return
+        self.partial += text
+        while (match := re.search(r"[.?!](\s|$|(?=[A-Z]))", self.partial)):
+            sentence, self.partial = self.partial[:match.end()], self.partial[match.end():]
+            shape = sentence_shape(sentence)
+            if shape == self.reply_end_shape:
+                self.quiet_until = now + self.runon_quiet
+            self.reply_end_shape = shape
+
+    def reply_ended(self) -> None:
+        self.reply_end_shape = None
+        self.partial = ""
+
+    def force_source(self, now: float) -> str | None:
+        return "stop" if self.held else "runon" if now < self.quiet_until else None
+
+    def listen_scale(self, now: float) -> float | None:
+        return self.request_scale if self.request_scale != 1.0 and now < self.request_until else None
 
 
 class MicrophoneActivity:

@@ -53,7 +53,7 @@ class MiniCPMDiagnostics:
         Age starts before send, therefore includes transport/queue/model time.
         This is not a native receipt timestamp or an inference-only latency.
         """
-        if force_source not in {"none", "typed", "microphone"}:
+        if force_source not in {"none", "typed", "microphone", "stop", "runon"}:
             raise ValueError("Unknown force-listen source")
         self._input_sequence += 1
         input_id = f"diag-{self._input_sequence}"

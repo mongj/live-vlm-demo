@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from websockets.asyncio.client import ClientConnection, connect
 
 from .base import Adapter
-from .minicpm_inputs import TypedAudioQueue, MicrophoneSegmenter, MicrophoneActivity
+from .minicpm_inputs import TypedAudioQueue, MicrophoneSegmenter, MicrophoneActivity, ReplyController
 from .minicpm_diagnostics import MiniCPMDiagnostics
 from ..speech_client import SpeechClient, SpeechUnavailable
 from ..input_events import AdapterEvent, SpeechCapabilities, InputStatus, InputTranscription
@@ -33,6 +33,7 @@ INPUT_BYTES = INPUT_SAMPLES * 2
 JITTER_BUFFER_BYTES = INPUT_BYTES * 2
 SEND_INTERVAL_SECONDS = 1.0
 REPLY_QUEUE_SIZE = 64
+REQUEST_WINDOW_SECONDS = 8.0
 logger = logging.getLogger(__name__)
 # The model can end a unit inside a word and open the next with a spaced token (" cabinet" + " s", " ti" + " ger").
 # A one or two letter piece outside this list is taken as part of a word. Longer pieces cannot be told from words.
@@ -96,10 +97,18 @@ class MiniCPMConfig(BaseModel):
         title="Turn-length bias",
         description="Above 1 encourages longer turns; below 1 encourages earlier endings. This is not a maximum token count.",
     )
-    listen_prob_scale: float = Field(
-        default=1.0, strict=True, allow_inf_nan=False, ge=0.5, le=1.5,
-        title="Listen bias",
-        description="Scales the model's score for staying silent each second. Below 1 makes it more willing to speak, and it may talk more. 1 is the native setting.",
+    request_listen_scale: float = Field(
+        default=0.9, strict=True, allow_inf_nan=False, ge=0.5, le=1.0,
+        title="Reply push after speech",
+        description="Listen score scale for up to 8 seconds after your speech is transcribed, until the model replies. Below 1 makes a reply more likely, and 1 turns it off. Works only with the corrected v4 runtime. Older runtimes ignore it.",
+    )
+    voice_stop: bool = Field(
+        default=True, title="Voice stop",
+        description="Saying only stop, wait or pause keeps the model silent until you speak again.",
+    )
+    runon_guard: bool = Field(
+        default=True, title="Stop repeating replies",
+        description="Ends a reply when its sentences keep repeating one pattern, such as an endless count, then keeps quiet for 8 seconds unless you speak. Off when Response policy is none.",
     )
 
 
@@ -196,6 +205,9 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
         self._drop_warned = False
         self._no_lead_session: bool | None = None
         self._text_tail = ""
+        self._control = ReplyController(voice_stop=self.config.voice_stop, request_scale=self.config.request_listen_scale,
+                                        request_window=REQUEST_WINDOW_SECONDS,
+                                        runon_guard=self.config.runon_guard and self.config.response_policy != "none")
         self._speech: SpeechClient | None = None
         self._speech_caps: SpeechCapabilities = {"version":1, "transcription":False, "typed_input":False,
                                                 "reason":"Self-hosted speech is not configured"}
@@ -318,17 +330,14 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
         raise SessionError("MiniCPM disconnected during startup", fatal=True)
 
     def _session_config(self) -> dict[str, Any]:
-        """Native reuses its view config: send defaults too, on every session. Listen bias goes only when changed."""
-        config: dict[str, Any] = {
+        """Native reuses its view config: send defaults too, on every session."""
+        return {
             "decode_mode": self.config.decode_mode,
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
             "top_k": self.config.top_k,
             "length_penalty": self.config.length_penalty,
         }
-        if self.config.listen_prob_scale != 1.0:
-            config["listen_prob_scale"] = self.config.listen_prob_scale
-        return config
 
     def offer_text(self, text: str) -> None:
         if text.strip():
@@ -435,6 +444,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                 if epoch != self._asr_epoch or self._closing: continue
                 self._diagnostics.helper("asr", started)
                 self._diagnostics.emit(self._diagnostic_replies, "asr_complete")
+                self._control.heard(text, update.final, time.monotonic())
                 await self._replies.put(InputTranscription(update.utterance_id, generation, order, update.revision, text, update.final))
             except asyncio.CancelledError:
                 raise
@@ -500,10 +510,16 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                 frame = self._frame
                 self._frame = None
                 body: dict[str, Any] = {"audio": base64.b64encode(s16le_to_f32le(pcm)).decode("ascii"), "max_slice_nums": 1}
+                now = time.monotonic()
                 force_source = "typed" if force_listen else (
-                    "microphone" if self._microphone_activity.take_force_listen(time.monotonic()) else "none")
+                    "microphone" if self._microphone_activity.take_force_listen(now) else
+                    self._control.force_source(now) or "none")
                 if force_source != "none":
                     body["force_listen"] = True
+                else:
+                    listen_scale = self._control.listen_scale(now)
+                    if listen_scale is not None:
+                        body["listen_prob_scale"] = listen_scale
                 if frame is not None:
                     body["video_frames"] = [base64.b64encode(frame.jpeg).decode("ascii")]
                 # The native protocol echoes this opaque ID on listen/text/audio.
@@ -585,6 +601,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
         if kind == "listen":
             self._caption_pair = None
             self._text_tail = ""
+            self._control.reply_ended()
             self._diagnostics.output(kind, event)
             self._diagnostics.emit(self._diagnostic_replies, "model_output")
             if not self._output_open:
@@ -597,6 +614,7 @@ class MiniCPMAdapter(Adapter[MiniCPMConfig]):
                 raise SessionError("MiniCPM text delta is malformed", fatal=True)
             if not text:
                 return None
+            self._control.model_said(text, time.monotonic())
             self._diagnostics.output(kind, event)
             self._diagnostics.emit(self._diagnostic_replies, "model_output")
             if not self._output_open: self._assistant_order = self._next_order()
